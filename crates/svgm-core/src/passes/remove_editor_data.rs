@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Editor namespace URIs to remove.
 const EDITOR_NAMESPACES: &[&str] = &[
@@ -27,8 +27,7 @@ const EDITOR_NAMESPACES: &[&str] = &[
 
 /// Editor-specific namespace prefixes.
 const EDITOR_PREFIXES: &[&str] = &[
-    "inkscape", "sodipodi", "i", "sketch", "figma",
-    "dc", "cc", "rdf", "x", "a",
+    "inkscape", "sodipodi", "i", "sketch", "figma", "dc", "cc", "rdf", "x", "a",
 ];
 
 pub struct RemoveEditorData;
@@ -47,14 +46,16 @@ impl Pass for RemoveEditorData {
             if let NodeKind::Element(ref elem) = node.kind {
                 // Remove elements with editor namespace prefixes
                 if let Some(ref prefix) = elem.prefix
-                    && EDITOR_PREFIXES.contains(&prefix.as_str()) {
-                        doc.remove(id);
-                        changed = true;
-                        continue;
-                    }
+                    && EDITOR_PREFIXES.contains(&prefix.as_str())
+                {
+                    doc.remove(id);
+                    changed = true;
+                    continue;
+                }
 
                 // Remove editor-specific elements by name
-                if matches!(elem.name.as_str(),
+                if matches!(
+                    elem.name.as_str(),
                     "namedview" | "sodipodi:namedview" | "inkscape:perspective"
                 ) {
                     doc.remove(id);
@@ -75,7 +76,8 @@ impl Pass for RemoveEditorData {
                         !EDITOR_PREFIXES.contains(&prefix.as_str())
                     } else {
                         // Remove common editor-specific attributes without prefix
-                        !matches!(attr.name.as_str(),
+                        !matches!(
+                            attr.name.as_str(),
                             "data-name" // Illustrator
                         )
                     }
@@ -85,16 +87,19 @@ impl Pass for RemoveEditorData {
                 }
 
                 let before_ns = elem.namespaces.len();
-                elem.namespaces.retain(|ns| {
-                    !EDITOR_NAMESPACES.contains(&ns.uri.as_str())
-                });
+                elem.namespaces
+                    .retain(|ns| !EDITOR_NAMESPACES.contains(&ns.uri.as_str()));
                 if elem.namespaces.len() != before_ns {
                     changed = true;
                 }
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 

@@ -35,7 +35,9 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
                 // XML declaration like <?xml version="1.0"?> — we drop it for minification
             }
 
-            xmlparser::Token::ProcessingInstruction { target, content, .. } => {
+            xmlparser::Token::ProcessingInstruction {
+                target, content, ..
+            } => {
                 let target_str = target.as_str().to_string();
                 // Skip the xml declaration PI
                 if target_str == "xml" {
@@ -85,7 +87,12 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
                 pending_name = Some((prefix_str, local.as_str().to_string()));
             }
 
-            xmlparser::Token::Attribute { prefix, local, value, .. } => {
+            xmlparser::Token::Attribute {
+                prefix,
+                local,
+                value,
+                ..
+            } => {
                 let prefix_str = prefix.as_str();
                 let local_str = local.as_str();
                 let value_str = decode_xml_entities(value.as_str()).into_owned();
@@ -120,7 +127,8 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
                 match end {
                     xmlparser::ElementEnd::Open => {
                         // <tag ...> — push element onto stack
-                        let (prefix, name) = pending_name.take().ok_or(ParseError::UnexpectedEof)?;
+                        let (prefix, name) =
+                            pending_name.take().ok_or(ParseError::UnexpectedEof)?;
                         let elem = Element {
                             name,
                             prefix,
@@ -154,7 +162,8 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
                     }
                     xmlparser::ElementEnd::Empty => {
                         // <tag .../> — create element but don't push onto stack
-                        let (prefix, name) = pending_name.take().ok_or(ParseError::UnexpectedEof)?;
+                        let (prefix, name) =
+                            pending_name.take().ok_or(ParseError::UnexpectedEof)?;
                         let elem = Element {
                             name,
                             prefix,
@@ -278,7 +287,8 @@ mod tests {
 
     #[test]
     fn parse_with_comments_and_text() {
-        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><!-- a comment --><text>Hello</text></svg>"#;
+        let svg =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><!-- a comment --><text>Hello</text></svg>"#;
         let doc = parse(svg).unwrap();
         let svg_id = doc.children(doc.root).next().unwrap();
         let children: Vec<_> = doc.children(svg_id).collect();
@@ -308,10 +318,11 @@ mod tests {
         let use_id = doc.children(svg_id).next().unwrap();
         if let NodeKind::Element(ref elem) = doc.node(use_id).kind {
             assert_eq!(elem.name, "use");
-            assert!(elem
-                .attributes
-                .iter()
-                .any(|a| a.prefix.as_deref() == Some("xlink") && a.name == "href"));
+            assert!(
+                elem.attributes
+                    .iter()
+                    .any(|a| a.prefix.as_deref() == Some("xlink") && a.name == "href")
+            );
         }
     }
 }

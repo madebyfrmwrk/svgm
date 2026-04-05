@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 pub struct RemoveMetadata;
 
@@ -13,12 +13,17 @@ impl Pass for RemoveMetadata {
         let ids = doc.traverse();
         for id in ids {
             if let NodeKind::Element(ref elem) = doc.node(id).kind
-                && elem.name == "metadata" {
-                    doc.remove(id);
-                    changed = true;
-                }
+                && elem.name == "metadata"
+            {
+                doc.remove(id);
+                changed = true;
+            }
         }
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 pub struct RemoveDoctype;
 
@@ -17,6 +17,10 @@ impl Pass for RemoveDoctype {
                 changed = true;
             }
         }
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }

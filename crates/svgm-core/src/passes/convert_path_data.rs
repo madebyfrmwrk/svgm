@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 pub struct ConvertPathData {
     pub precision: u32,
@@ -23,15 +23,23 @@ impl Pass for ConvertPathData {
         for id in ids {
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind
-                && let Some(d_attr) = elem.attributes.iter_mut().find(|a| a.name == "d" && a.prefix.is_none())
-                    && let Some(optimized) = optimize_path(&d_attr.value, self.precision)
-                        && optimized.len() < d_attr.value.len() {
-                            d_attr.value = optimized;
-                            changed = true;
-                        }
+                && let Some(d_attr) = elem
+                    .attributes
+                    .iter_mut()
+                    .find(|a| a.name == "d" && a.prefix.is_none())
+                && let Some(optimized) = optimize_path(&d_attr.value, self.precision)
+                && optimized.len() < d_attr.value.len()
+            {
+                d_attr.value = optimized;
+                changed = true;
+            }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -102,7 +110,10 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 sy = cy;
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'M', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'M',
+                    args: vec![cx, cy],
+                });
             }
             'L' => {
                 cx = cmd.args[0];
@@ -116,31 +127,46 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 cy += cmd.args[1];
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'L', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'L',
+                    args: vec![cx, cy],
+                });
             }
             'H' => {
                 cx = cmd.args[0];
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'L', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'L',
+                    args: vec![cx, cy],
+                });
             }
             'h' => {
                 cx += cmd.args[0];
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'L', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'L',
+                    args: vec![cx, cy],
+                });
             }
             'V' => {
                 cy = cmd.args[0];
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'L', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'L',
+                    args: vec![cx, cy],
+                });
             }
             'v' => {
                 cy += cmd.args[0];
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'L', args: vec![cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'L',
+                    args: vec![cx, cy],
+                });
             }
             'C' => {
                 last_cubic_cp = Some((cmd.args[2], cmd.args[3]));
@@ -151,42 +177,64 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             }
             'c' => {
                 let abs = vec![
-                    cx + cmd.args[0], cy + cmd.args[1],
-                    cx + cmd.args[2], cy + cmd.args[3],
-                    cx + cmd.args[4], cy + cmd.args[5],
+                    cx + cmd.args[0],
+                    cy + cmd.args[1],
+                    cx + cmd.args[2],
+                    cy + cmd.args[3],
+                    cx + cmd.args[4],
+                    cy + cmd.args[5],
                 ];
                 last_cubic_cp = Some((abs[2], abs[3]));
                 last_quad_cp = None;
                 cx = abs[4];
                 cy = abs[5];
-                result.push(PathCmd { cmd: 'C', args: abs });
+                result.push(PathCmd {
+                    cmd: 'C',
+                    args: abs,
+                });
             }
             'S' => {
                 // Expand: first control point is reflection of last cubic cp
                 let cp1 = last_cubic_cp
                     .map(|(cpx, cpy)| (2.0 * cx - cpx, 2.0 * cy - cpy))
                     .unwrap_or((cx, cy));
-                let abs = vec![cp1.0, cp1.1, cmd.args[0], cmd.args[1], cmd.args[2], cmd.args[3]];
+                let abs = vec![
+                    cp1.0,
+                    cp1.1,
+                    cmd.args[0],
+                    cmd.args[1],
+                    cmd.args[2],
+                    cmd.args[3],
+                ];
                 last_cubic_cp = Some((abs[2], abs[3]));
                 last_quad_cp = None;
                 cx = abs[4];
                 cy = abs[5];
-                result.push(PathCmd { cmd: 'C', args: abs });
+                result.push(PathCmd {
+                    cmd: 'C',
+                    args: abs,
+                });
             }
             's' => {
                 let cp1 = last_cubic_cp
                     .map(|(cpx, cpy)| (2.0 * cx - cpx, 2.0 * cy - cpy))
                     .unwrap_or((cx, cy));
                 let abs = vec![
-                    cp1.0, cp1.1,
-                    cx + cmd.args[0], cy + cmd.args[1],
-                    cx + cmd.args[2], cy + cmd.args[3],
+                    cp1.0,
+                    cp1.1,
+                    cx + cmd.args[0],
+                    cy + cmd.args[1],
+                    cx + cmd.args[2],
+                    cy + cmd.args[3],
                 ];
                 last_cubic_cp = Some((abs[2], abs[3]));
                 last_quad_cp = None;
                 cx = abs[4];
                 cy = abs[5];
-                result.push(PathCmd { cmd: 'C', args: abs });
+                result.push(PathCmd {
+                    cmd: 'C',
+                    args: abs,
+                });
             }
             'Q' => {
                 last_quad_cp = Some((cmd.args[0], cmd.args[1]));
@@ -197,14 +245,19 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             }
             'q' => {
                 let abs = vec![
-                    cx + cmd.args[0], cy + cmd.args[1],
-                    cx + cmd.args[2], cy + cmd.args[3],
+                    cx + cmd.args[0],
+                    cy + cmd.args[1],
+                    cx + cmd.args[2],
+                    cy + cmd.args[3],
                 ];
                 last_quad_cp = Some((abs[0], abs[1]));
                 last_cubic_cp = None;
                 cx = abs[2];
                 cy = abs[3];
-                result.push(PathCmd { cmd: 'Q', args: abs });
+                result.push(PathCmd {
+                    cmd: 'Q',
+                    args: abs,
+                });
             }
             'T' => {
                 let cp = last_quad_cp
@@ -214,7 +267,10 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 last_cubic_cp = None;
                 cx = cmd.args[0];
                 cy = cmd.args[1];
-                result.push(PathCmd { cmd: 'Q', args: vec![cp.0, cp.1, cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'Q',
+                    args: vec![cp.0, cp.1, cx, cy],
+                });
             }
             't' => {
                 let cp = last_quad_cp
@@ -224,7 +280,10 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 last_cubic_cp = None;
                 cx += cmd.args[0];
                 cy += cmd.args[1];
-                result.push(PathCmd { cmd: 'Q', args: vec![cp.0, cp.1, cx, cy] });
+                result.push(PathCmd {
+                    cmd: 'Q',
+                    args: vec![cp.0, cp.1, cx, cy],
+                });
             }
             'A' => {
                 last_cubic_cp = None;
@@ -237,20 +296,30 @@ fn normalize_to_absolute(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 last_cubic_cp = None;
                 last_quad_cp = None;
                 let abs = vec![
-                    cmd.args[0], cmd.args[1], cmd.args[2],
-                    cmd.args[3], cmd.args[4],
-                    cx + cmd.args[5], cy + cmd.args[6],
+                    cmd.args[0],
+                    cmd.args[1],
+                    cmd.args[2],
+                    cmd.args[3],
+                    cmd.args[4],
+                    cx + cmd.args[5],
+                    cy + cmd.args[6],
                 ];
                 cx = abs[5];
                 cy = abs[6];
-                result.push(PathCmd { cmd: 'A', args: abs });
+                result.push(PathCmd {
+                    cmd: 'A',
+                    args: abs,
+                });
             }
             'Z' | 'z' => {
                 cx = sx;
                 cy = sy;
                 last_cubic_cp = None;
                 last_quad_cp = None;
-                result.push(PathCmd { cmd: 'Z', args: vec![] });
+                result.push(PathCmd {
+                    cmd: 'Z',
+                    args: vec![],
+                });
             }
             _ => {
                 result.push(cmd);
@@ -276,7 +345,10 @@ fn simplify_curves(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
                 if is_collinear(cx, cy, x1, y1, x, y, precision)
                     && is_collinear(cx, cy, x2, y2, x, y, precision)
                 {
-                    result.push(PathCmd { cmd: 'L', args: vec![x, y] });
+                    result.push(PathCmd {
+                        cmd: 'L',
+                        args: vec![x, y],
+                    });
                 } else {
                     result.push(cmd);
                 }
@@ -287,7 +359,10 @@ fn simplify_curves(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
                 let (cpx, cpy) = (cmd.args[0], cmd.args[1]);
                 let (x, y) = (cmd.args[2], cmd.args[3]);
                 if is_collinear(cx, cy, cpx, cpy, x, y, precision) {
-                    result.push(PathCmd { cmd: 'L', args: vec![x, y] });
+                    result.push(PathCmd {
+                        cmd: 'L',
+                        args: vec![x, y],
+                    });
                 } else {
                     result.push(cmd);
                 }
@@ -352,7 +427,10 @@ fn detect_shorthands(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
                     if approx_eq(x1, reflected_x, precision)
                         && approx_eq(y1, reflected_y, precision)
                     {
-                        result.push(PathCmd { cmd: 'S', args: vec![x2, y2, x, y] });
+                        result.push(PathCmd {
+                            cmd: 'S',
+                            args: vec![x2, y2, x, y],
+                        });
                         last_cubic_cp2 = Some((x2, y2));
                         last_quad_cp = None;
                         cx = x;
@@ -378,7 +456,10 @@ fn detect_shorthands(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
                     if approx_eq(cpx, reflected_x, precision)
                         && approx_eq(cpy, reflected_y, precision)
                     {
-                        result.push(PathCmd { cmd: 'T', args: vec![x, y] });
+                        result.push(PathCmd {
+                            cmd: 'T',
+                            args: vec![x, y],
+                        });
                         last_quad_cp = Some((cpx, cpy));
                         last_cubic_cp2 = None;
                         cx = x;
@@ -489,11 +570,12 @@ fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
 
         // Check if next char is a command letter
         if let Some(&c) = chars.peek()
-            && is_command(c) {
-                current_cmd = Some(c);
-                chars.next();
-                skip_ws_comma(&mut chars);
-            }
+            && is_command(c)
+        {
+            current_cmd = Some(c);
+            chars.next();
+            skip_ws_comma(&mut chars);
+        }
 
         let mut cmd = current_cmd?;
         let arg_count = args_for_command(cmd);
@@ -516,9 +598,10 @@ fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
 
             // Check if next is a new command
             if let Some(&c) = chars.peek()
-                && is_command(c) {
-                    break;
-                }
+                && is_command(c)
+            {
+                break;
+            }
 
             let mut args = Vec::with_capacity(arg_count);
             for i in 0..arg_count {
@@ -526,11 +609,12 @@ fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
                 // For arc commands, args 3 and 4 are flags (0 or 1)
                 if (cmd == 'A' || cmd == 'a') && (i == 3 || i == 4) {
                     if let Some(&c) = chars.peek()
-                        && (c == '0' || c == '1') {
-                            chars.next();
-                            args.push(if c == '1' { 1.0 } else { 0.0 });
-                            continue;
-                        }
+                        && (c == '0' || c == '1')
+                    {
+                        chars.next();
+                        args.push(if c == '1' { 1.0 } else { 0.0 });
+                        continue;
+                    }
                     return None; // invalid arc flag
                 }
                 if let Some(n) = parse_number(&mut chars) {
@@ -584,7 +668,10 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 let rel_str = format_num(rx).len() + format_num(ry).len();
 
                 if rel_str < abs_str && !(cx == 0.0 && cy == 0.0) {
-                    result.push(PathCmd { cmd: 'm', args: vec![rx, ry] });
+                    result.push(PathCmd {
+                        cmd: 'm',
+                        args: vec![rx, ry],
+                    });
                 } else {
                     result.push(cmd.clone());
                 }
@@ -611,23 +698,38 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                     let abs_h = format_num(x);
                     let rel_h = format_num(rx);
                     if rel_h.len() <= abs_h.len() {
-                        result.push(PathCmd { cmd: 'h', args: vec![rx] });
+                        result.push(PathCmd {
+                            cmd: 'h',
+                            args: vec![rx],
+                        });
                     } else {
-                        result.push(PathCmd { cmd: 'H', args: vec![x] });
+                        result.push(PathCmd {
+                            cmd: 'H',
+                            args: vec![x],
+                        });
                     }
                 } else if rx == 0.0 {
                     let abs_v = format_num(y);
                     let rel_v = format_num(ry);
                     if rel_v.len() <= abs_v.len() {
-                        result.push(PathCmd { cmd: 'v', args: vec![ry] });
+                        result.push(PathCmd {
+                            cmd: 'v',
+                            args: vec![ry],
+                        });
                     } else {
-                        result.push(PathCmd { cmd: 'V', args: vec![y] });
+                        result.push(PathCmd {
+                            cmd: 'V',
+                            args: vec![y],
+                        });
                     }
                 } else {
                     let abs_len = format_num(x).len() + format_num(y).len();
                     let rel_len = format_num(rx).len() + format_num(ry).len();
                     if rel_len < abs_len {
-                        result.push(PathCmd { cmd: 'l', args: vec![rx, ry] });
+                        result.push(PathCmd {
+                            cmd: 'l',
+                            args: vec![rx, ry],
+                        });
                     } else {
                         result.push(cmd.clone());
                     }
@@ -640,9 +742,15 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 cy += cmd.args[1];
                 // Convert to h/v if one component is 0
                 if cmd.args[1] == 0.0 {
-                    result.push(PathCmd { cmd: 'h', args: vec![cmd.args[0]] });
+                    result.push(PathCmd {
+                        cmd: 'h',
+                        args: vec![cmd.args[0]],
+                    });
                 } else if cmd.args[0] == 0.0 {
-                    result.push(PathCmd { cmd: 'v', args: vec![cmd.args[1]] });
+                    result.push(PathCmd {
+                        cmd: 'v',
+                        args: vec![cmd.args[1]],
+                    });
                 } else {
                     result.push(cmd);
                 }
@@ -653,7 +761,10 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 let abs_s = format_num(x);
                 let rel_s = format_num(rx);
                 if rel_s.len() < abs_s.len() {
-                    result.push(PathCmd { cmd: 'h', args: vec![rx] });
+                    result.push(PathCmd {
+                        cmd: 'h',
+                        args: vec![rx],
+                    });
                 } else {
                     result.push(cmd.clone());
                 }
@@ -669,7 +780,10 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 let abs_s = format_num(y);
                 let rel_s = format_num(ry);
                 if rel_s.len() < abs_s.len() {
-                    result.push(PathCmd { cmd: 'v', args: vec![ry] });
+                    result.push(PathCmd {
+                        cmd: 'v',
+                        args: vec![ry],
+                    });
                 } else {
                     result.push(cmd.clone());
                 }
@@ -682,9 +796,12 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             'C' => {
                 let args = &cmd.args;
                 let rx: Vec<f64> = vec![
-                    args[0] - cx, args[1] - cy,
-                    args[2] - cx, args[3] - cy,
-                    args[4] - cx, args[5] - cy,
+                    args[0] - cx,
+                    args[1] - cy,
+                    args[2] - cx,
+                    args[3] - cy,
+                    args[4] - cx,
+                    args[5] - cy,
                 ];
                 let abs_len: usize = args.iter().map(|n| format_num(*n).len()).sum();
                 let rel_len: usize = rx.iter().map(|n| format_num(*n).len()).sum();
@@ -703,10 +820,7 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             }
             'S' => {
                 let args = &cmd.args;
-                let rx: Vec<f64> = vec![
-                    args[0] - cx, args[1] - cy,
-                    args[2] - cx, args[3] - cy,
-                ];
+                let rx: Vec<f64> = vec![args[0] - cx, args[1] - cy, args[2] - cx, args[3] - cy];
                 let abs_len: usize = args.iter().map(|n| format_num(*n).len()).sum();
                 let rel_len: usize = rx.iter().map(|n| format_num(*n).len()).sum();
                 if rel_len < abs_len {
@@ -724,10 +838,7 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             }
             'Q' => {
                 let args = &cmd.args;
-                let rx: Vec<f64> = vec![
-                    args[0] - cx, args[1] - cy,
-                    args[2] - cx, args[3] - cy,
-                ];
+                let rx: Vec<f64> = vec![args[0] - cx, args[1] - cy, args[2] - cx, args[3] - cy];
                 let abs_len: usize = args.iter().map(|n| format_num(*n).len()).sum();
                 let rel_len: usize = rx.iter().map(|n| format_num(*n).len()).sum();
                 if rel_len < abs_len {
@@ -751,7 +862,10 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
                 let abs_len = format_num(x).len() + format_num(y).len();
                 let rel_len = format_num(rx).len() + format_num(ry).len();
                 if rel_len < abs_len {
-                    result.push(PathCmd { cmd: 't', args: vec![rx, ry] });
+                    result.push(PathCmd {
+                        cmd: 't',
+                        args: vec![rx, ry],
+                    });
                 } else {
                     result.push(cmd.clone());
                 }
@@ -789,7 +903,10 @@ fn abs_to_rel(commands: Vec<PathCmd>) -> Vec<PathCmd> {
             'Z' | 'z' => {
                 cx = sx;
                 cy = sy;
-                result.push(PathCmd { cmd: 'z', args: vec![] });
+                result.push(PathCmd {
+                    cmd: 'z',
+                    args: vec![],
+                });
             }
             _ => {
                 result.push(cmd);
@@ -814,7 +931,9 @@ fn serialize_path(commands: &[PathCmd], precision: u32) -> String {
             false
         } else if prev_cmd == Some('M') && c == 'L' {
             false
-        } else { !(prev_cmd == Some('m') && c == 'l') };
+        } else {
+            !(prev_cmd == Some('m') && c == 'l')
+        };
 
         if emit_cmd {
             // No space needed before Z
@@ -870,7 +989,9 @@ fn needs_separator_before(out: &str, next: &str) -> bool {
         // .X can self-separate only when the preceding number already contains
         // a decimal point (e.g. "1.5.4" → 1.5 and 0.4). If the preceding
         // number has no dot, ".4" after "0" would be read as "0.4" (one number).
-        let has_prior_dot = out.bytes().rev()
+        let has_prior_dot = out
+            .bytes()
+            .rev()
             .take_while(|&b| b.is_ascii_digit() || b == b'.')
             .any(|b| b == b'.');
         return !has_prior_dot;
@@ -907,9 +1028,28 @@ fn format_num(val: f64) -> String {
 }
 
 fn is_command(c: char) -> bool {
-    matches!(c, 'M' | 'm' | 'L' | 'l' | 'H' | 'h' | 'V' | 'v'
-        | 'C' | 'c' | 'S' | 's' | 'Q' | 'q' | 'T' | 't'
-        | 'A' | 'a' | 'Z' | 'z')
+    matches!(
+        c,
+        'M' | 'm'
+            | 'L'
+            | 'l'
+            | 'H'
+            | 'h'
+            | 'V'
+            | 'v'
+            | 'C'
+            | 'c'
+            | 'S'
+            | 's'
+            | 'Q'
+            | 'q'
+            | 'T'
+            | 't'
+            | 'A'
+            | 'a'
+            | 'Z'
+            | 'z'
+    )
 }
 
 fn args_for_command(cmd: char) -> usize {
@@ -940,10 +1080,11 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f64>
 
     // Optional sign
     if let Some(&c) = chars.peek()
-        && (c == '-' || c == '+') {
-            s.push(c);
-            chars.next();
-        }
+        && (c == '-' || c == '+')
+    {
+        s.push(c);
+        chars.next();
+    }
 
     // Integer part
     let mut has_digits = false;
@@ -978,23 +1119,25 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f64>
 
     // Exponent
     if let Some(&c) = chars.peek()
-        && (c == 'e' || c == 'E') {
+        && (c == 'e' || c == 'E')
+    {
+        s.push(c);
+        chars.next();
+        if let Some(&c) = chars.peek()
+            && (c == '+' || c == '-')
+        {
             s.push(c);
             chars.next();
-            if let Some(&c) = chars.peek()
-                && (c == '+' || c == '-') {
-                    s.push(c);
-                    chars.next();
-                }
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_digit() {
-                    s.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
+        }
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                s.push(c);
+                chars.next();
+            } else {
+                break;
             }
         }
+    }
 
     s.parse().ok()
 }
@@ -1016,15 +1159,25 @@ mod tests {
     fn converts_l_to_h_v() {
         let d = "M0 0L100 0L100 200";
         let result = optimize_path(d, 3).unwrap();
-        assert!(result.contains('h') || result.contains('H') || result.contains('v') || result.contains('V'),
-            "should use H/V shortcuts: {result}");
+        assert!(
+            result.contains('h')
+                || result.contains('H')
+                || result.contains('v')
+                || result.contains('V'),
+            "should use H/V shortcuts: {result}"
+        );
     }
 
     #[test]
     fn handles_cubic_bezier() {
         let d = "M239.248 207.643C233.892 207.643 229.713 205.607 226.714 201.536";
         let result = optimize_path(d, 3).unwrap();
-        assert!(result.len() <= d.len(), "should not grow: original={}, result={}", d.len(), result.len());
+        assert!(
+            result.len() <= d.len(),
+            "should not grow: original={}, result={}",
+            d.len(),
+            result.len()
+        );
     }
 
     #[test]
@@ -1058,7 +1211,10 @@ mod tests {
         let result = optimize_path(d, 3).unwrap();
         // Should not corrupt arc commands
         let reparsed = parse_path(&result);
-        assert!(reparsed.is_some(), "optimized arc should be re-parseable: {result}");
+        assert!(
+            reparsed.is_some(),
+            "optimized arc should be re-parseable: {result}"
+        );
     }
 
     // ── Path torture tests ─────────────────────────────────────────────
@@ -1077,7 +1233,10 @@ mod tests {
         for d in paths {
             let optimized = optimize_path(d, 3).unwrap();
             let reparsed = parse_path(&optimized);
-            assert!(reparsed.is_some(), "failed to reparse optimized: {d} -> {optimized}");
+            assert!(
+                reparsed.is_some(),
+                "failed to reparse optimized: {d} -> {optimized}"
+            );
         }
     }
 
@@ -1096,7 +1255,10 @@ mod tests {
         for d in paths {
             let first = optimize_path(d, 3).unwrap();
             let second = optimize_path(&first, 3).unwrap();
-            assert_eq!(first, second, "not converged for: {d}\n  first:  {first}\n  second: {second}");
+            assert_eq!(
+                first, second,
+                "not converged for: {d}\n  first:  {first}\n  second: {second}"
+            );
         }
     }
 
@@ -1107,10 +1269,18 @@ mod tests {
                 let d = format!("M10 80A25 25 0 {large_arc} {sweep} 50 80");
                 let result = optimize_path(&d, 3).unwrap();
                 let cmds = parse_path(&result).unwrap();
-                let arc = cmds.iter().find(|c| c.cmd == 'a' || c.cmd == 'A')
+                let arc = cmds
+                    .iter()
+                    .find(|c| c.cmd == 'a' || c.cmd == 'A')
                     .expect(&format!("no arc found in optimized: {d} -> {result}"));
-                assert_eq!(arc.args[3] as i32, large_arc, "large-arc-flag mangled for {d} -> {result}");
-                assert_eq!(arc.args[4] as i32, sweep, "sweep-flag mangled for {d} -> {result}");
+                assert_eq!(
+                    arc.args[3] as i32, large_arc,
+                    "large-arc-flag mangled for {d} -> {result}"
+                );
+                assert_eq!(
+                    arc.args[4] as i32, sweep,
+                    "sweep-flag mangled for {d} -> {result}"
+                );
             }
         }
     }
@@ -1120,14 +1290,25 @@ mod tests {
         let d = "M10 10A0 0 0 0 1 20 20";
         let result = optimize_path(d, 3).unwrap();
         let cmds = parse_path(&result).unwrap();
-        assert!(!cmds.is_empty(), "zero-radius arc should not produce empty path");
+        assert!(
+            !cmds.is_empty(),
+            "zero-radius arc should not produce empty path"
+        );
     }
 
     #[test]
     fn negative_zero_normalized() {
         assert_eq!(format_num(-0.0), "0", "format_num(-0.0) should be '0'");
-        assert_eq!(round_and_format(-0.0, 3), "0", "round_and_format(-0.0, 3) should be '0'");
-        assert_eq!(round_and_format(-0.0001, 3), "0", "near-negative-zero should round to '0'");
+        assert_eq!(
+            round_and_format(-0.0, 3),
+            "0",
+            "round_and_format(-0.0, 3) should be '0'"
+        );
+        assert_eq!(
+            round_and_format(-0.0001, 3),
+            "0",
+            "near-negative-zero should round to '0'"
+        );
     }
 
     #[test]
@@ -1150,7 +1331,11 @@ mod tests {
     fn implicit_lineto_after_moveto() {
         let d = "M0 0 10 10 20 20";
         let cmds = parse_path(d).unwrap();
-        assert_eq!(cmds.len(), 3, "M with extra pairs should produce implicit L commands");
+        assert_eq!(
+            cmds.len(),
+            3,
+            "M with extra pairs should produce implicit L commands"
+        );
         assert_eq!(cmds[0].cmd, 'M');
         assert_eq!(cmds[1].cmd, 'L');
         assert_eq!(cmds[2].cmd, 'L');
@@ -1174,10 +1359,14 @@ mod tests {
 
     #[test]
     fn accumulated_rounding_stays_accurate() {
-        let d = "M0 0L0.4 0.4L0.8 0.8L1.2 1.2L1.6 1.6L2.0 2.0L2.4 2.4L2.8 2.8L3.2 3.2L3.6 3.6L4.0 4.0";
+        let d =
+            "M0 0L0.4 0.4L0.8 0.8L1.2 1.2L1.6 1.6L2.0 2.0L2.4 2.4L2.8 2.8L3.2 3.2L3.6 3.6L4.0 4.0";
         let result = optimize_path(d, 3).unwrap();
         let cmds = parse_path(&result).unwrap();
-        assert!(cmds.len() >= 11, "should preserve all line segments: {result}");
+        assert!(
+            cmds.len() >= 11,
+            "should preserve all line segments: {result}"
+        );
     }
 
     #[test]
@@ -1220,24 +1409,30 @@ mod tests {
         // Cubic where all control points are collinear: C on the line from (0,0) to (30,30)
         let d = "M0 0C10 10 20 20 30 30";
         let result = optimize_path(d, 3).unwrap();
-        assert!(!result.contains('C') && !result.contains('c'),
-            "degenerate cubic should become line: {result}");
+        assert!(
+            !result.contains('C') && !result.contains('c'),
+            "degenerate cubic should become line: {result}"
+        );
     }
 
     #[test]
     fn degenerate_quadratic_becomes_line() {
         let d = "M0 0Q15 15 30 30";
         let result = optimize_path(d, 3).unwrap();
-        assert!(!result.contains('Q') && !result.contains('q'),
-            "degenerate quadratic should become line: {result}");
+        assert!(
+            !result.contains('Q') && !result.contains('q'),
+            "degenerate quadratic should become line: {result}"
+        );
     }
 
     #[test]
     fn non_degenerate_cubic_preserved() {
         let d = "M0 0C0 50 50 50 50 0";
         let result = optimize_path(d, 3).unwrap();
-        assert!(result.contains('c') || result.contains('C'),
-            "non-degenerate cubic should stay as curve: {result}");
+        assert!(
+            result.contains('c') || result.contains('C'),
+            "non-degenerate cubic should stay as curve: {result}"
+        );
     }
 
     #[test]
@@ -1246,7 +1441,10 @@ mod tests {
         let result = optimize_path(d, 3).unwrap();
         let cmds = parse_path(&result).unwrap();
         // Should have M + L (the duplicate L10 10 removed)
-        assert!(cmds.len() <= 2, "zero-length line should be removed: {result}");
+        assert!(
+            cmds.len() <= 2,
+            "zero-length line should be removed: {result}"
+        );
     }
 
     #[test]

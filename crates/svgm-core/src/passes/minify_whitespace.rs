@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Remove whitespace-only text nodes that exist purely as formatting.
 /// Preserves whitespace inside <text>, <tspan>, <textPath>, <title>, <desc>,
@@ -7,8 +7,14 @@ use super::{Pass, PassResult};
 pub struct MinifyWhitespace;
 
 const TEXT_CONTENT_ELEMENTS: &[&str] = &[
-    "text", "tspan", "textPath", "title", "desc",
-    "style", "script", "foreignObject",
+    "text",
+    "tspan",
+    "textPath",
+    "title",
+    "desc",
+    "style",
+    "script",
+    "foreignObject",
 ];
 
 impl Pass for MinifyWhitespace {
@@ -23,19 +29,25 @@ impl Pass for MinifyWhitespace {
         for id in ids {
             let node = doc.node(id);
             if let NodeKind::Text(ref text) = node.kind
-                && text.trim().is_empty() {
-                    // Check if parent is a text-content element
-                    if let Some(parent_id) = node.parent
-                        && let NodeKind::Element(ref parent_elem) = doc.node(parent_id).kind
-                            && TEXT_CONTENT_ELEMENTS.contains(&parent_elem.name.as_str()) {
-                                continue;
-                            }
-                    doc.remove(id);
-                    changed = true;
+                && text.trim().is_empty()
+            {
+                // Check if parent is a text-content element
+                if let Some(parent_id) = node.parent
+                    && let NodeKind::Element(ref parent_elem) = doc.node(parent_id).kind
+                    && TEXT_CONTENT_ELEMENTS.contains(&parent_elem.name.as_str())
+                {
+                    continue;
                 }
+                doc.remove(id);
+                changed = true;
+            }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -47,7 +59,8 @@ mod tests {
 
     #[test]
     fn removes_formatting_whitespace() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <rect/>\n  <circle r=\"5\"/>\n</svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <rect/>\n  <circle r=\"5\"/>\n</svg>";
         let mut doc = parse(input).unwrap();
         assert_eq!(MinifyWhitespace.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);

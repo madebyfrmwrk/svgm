@@ -29,8 +29,9 @@ fn assert_valid_svg(output: &str, source: &str) {
 
 #[test]
 fn synthetic_comments_and_metadata() {
-    let (output, input_size, output_size) =
-        optimize_file(Path::new("tests/fixtures/synthetic/comments_and_metadata.svg"));
+    let (output, input_size, output_size) = optimize_file(Path::new(
+        "tests/fixtures/synthetic/comments_and_metadata.svg",
+    ));
     assert_valid_svg(&output, "comments_and_metadata");
 
     // Should remove comments
@@ -38,19 +39,28 @@ fn synthetic_comments_and_metadata() {
     // Should remove metadata
     assert!(!output.contains("<metadata"), "metadata should be removed");
     // Should remove inkscape/sodipodi elements and attrs
-    assert!(!output.contains("inkscape"), "inkscape data should be removed");
-    assert!(!output.contains("sodipodi"), "sodipodi data should be removed");
-    // Should remove empty containers
     assert!(
-        !output.contains("><g></g>"),
-        "empty <g> should be removed"
+        !output.contains("inkscape"),
+        "inkscape data should be removed"
     );
+    assert!(
+        !output.contains("sodipodi"),
+        "sodipodi data should be removed"
+    );
+    // Should remove empty containers
+    assert!(!output.contains("><g></g>"), "empty <g> should be removed");
     // Should convert colors
     assert!(output.contains("fill=\"red\"") || output.contains("fill=\"#f00\""));
     // Should clean numeric values
-    assert!(!output.contains("50.000"), "trailing zeros should be removed");
+    assert!(
+        !output.contains("50.000"),
+        "trailing zeros should be removed"
+    );
     // Should remove empty attrs
-    assert!(!output.contains("class=\"\""), "empty class should be removed");
+    assert!(
+        !output.contains("class=\"\""),
+        "empty class should be removed"
+    );
     // Should be significantly smaller
     assert!(
         output_size < input_size * 80 / 100,
@@ -60,13 +70,17 @@ fn synthetic_comments_and_metadata() {
 
 #[test]
 fn synthetic_nested_empty_groups() {
-    let (output, _, _) =
-        optimize_file(Path::new("tests/fixtures/synthetic/nested_empty_groups.svg"));
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/synthetic/nested_empty_groups.svg",
+    ));
     assert_valid_svg(&output, "nested_empty_groups");
     // All <g> elements should be collapsed (empty ones removed, single-child ones unwrapped)
     assert!(output.contains("<rect"), "rect should be preserved");
     let g_count = output.matches("<g>").count() + output.matches("<g ").count();
-    assert_eq!(g_count, 0, "all groups should be collapsed, found {g_count}");
+    assert_eq!(
+        g_count, 0,
+        "all groups should be collapsed, found {g_count}"
+    );
 }
 
 #[test]
@@ -88,8 +102,9 @@ fn synthetic_colors_and_numbers() {
 
 #[test]
 fn synthetic_empty_text_elements() {
-    let (output, _, _) =
-        optimize_file(Path::new("tests/fixtures/synthetic/empty_text_elements.svg"));
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/synthetic/empty_text_elements.svg",
+    ));
     assert_valid_svg(&output, "empty_text_elements");
     // Should keep text with content
     assert!(output.contains("Hello world"));
@@ -98,8 +113,9 @@ fn synthetic_empty_text_elements() {
 
 #[test]
 fn synthetic_preserves_animation() {
-    let (output, _, _) =
-        optimize_file(Path::new("tests/fixtures/synthetic/preserves_animation.svg"));
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/synthetic/preserves_animation.svg",
+    ));
     assert_valid_svg(&output, "preserves_animation");
     // Animation elements must be preserved
     assert!(output.contains("<animate"), "animate should be preserved");
@@ -113,19 +129,20 @@ fn synthetic_preserves_animation() {
 
 #[test]
 fn regression_symbol_use_ref() {
-    let (output, _, _) =
-        optimize_file(Path::new("tests/fixtures/regression/symbol_use_ref.svg"));
+    let (output, _, _) = optimize_file(Path::new("tests/fixtures/regression/symbol_use_ref.svg"));
     assert_valid_svg(&output, "symbol_use_ref");
     // Symbol must be preserved because it's referenced by <use>
     assert!(output.contains("<symbol"), "symbol should be preserved");
     assert!(output.contains("<use"), "use should be preserved");
-    assert!(output.contains("#icon"), "icon reference should be preserved");
+    assert!(
+        output.contains("#icon"),
+        "icon reference should be preserved"
+    );
 }
 
 #[test]
 fn regression_foreign_object() {
-    let (output, _, _) =
-        optimize_file(Path::new("tests/fixtures/regression/foreign_object.svg"));
+    let (output, _, _) = optimize_file(Path::new("tests/fixtures/regression/foreign_object.svg"));
     assert_valid_svg(&output, "foreign_object");
     // foreignObject content must be preserved
     assert!(
@@ -140,7 +157,10 @@ fn regression_foreign_object() {
 #[test]
 fn path_torture_fixtures() {
     let fixture_dir = Path::new("tests/fixtures/regression/path_torture");
-    assert!(fixture_dir.exists(), "path_torture fixture directory missing");
+    assert!(
+        fixture_dir.exists(),
+        "path_torture fixture directory missing"
+    );
     let mut count = 0;
     for entry in fs::read_dir(fixture_dir).unwrap() {
         let path = entry.unwrap().path();
@@ -165,13 +185,19 @@ fn path_torture_fixtures() {
             count += 1;
         }
     }
-    assert!(count >= 15, "expected at least 15 path torture fixtures, found {count}");
+    assert!(
+        count >= 15,
+        "expected at least 15 path torture fixtures, found {count}"
+    );
 }
 
 #[test]
 fn path_torture_structural_equivalence() {
     let fixture_dir = Path::new("tests/fixtures/regression/path_torture");
-    assert!(fixture_dir.exists(), "path_torture fixture directory missing");
+    assert!(
+        fixture_dir.exists(),
+        "path_torture fixture directory missing"
+    );
     for entry in fs::read_dir(fixture_dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().map_or(false, |e| e == "svg") {

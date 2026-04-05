@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeId, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeId, NodeKind};
 
 /// Attributes that have different semantics on a `<g>` than on individual elements.
 /// clip-path/mask/filter on a group clip/mask/filter the composited result of all children,
@@ -34,13 +34,15 @@ impl Pass for CollapseGroups {
 
                 // Case 1: Empty group (no meaningful children) — handled by remove_empty_containers
                 // Case 2: Group with no attributes — unwrap children to parent
-                if elem.attributes.is_empty() && elem.prefix.is_none()
-                    && let Some(parent_id) = doc.node(id).parent {
-                        hoist_children(doc, id, parent_id);
-                        doc.node_mut(id).removed = true;
-                        changed = true;
-                        continue;
-                    }
+                if elem.attributes.is_empty()
+                    && elem.prefix.is_none()
+                    && let Some(parent_id) = doc.node(id).parent
+                {
+                    hoist_children(doc, id, parent_id);
+                    doc.node_mut(id).removed = true;
+                    changed = true;
+                    continue;
+                }
 
                 // Case 3: Group with single element child — merge attrs down if no conflicts
                 if children.len() == 1 {
@@ -49,8 +51,14 @@ impl Pass for CollapseGroups {
                         // Only merge if child is also an element (not text/comment)
                         // and the group has no transform (transform merging is complex)
                         let g_has_transform = elem.attributes.iter().any(|a| a.name == "transform");
-                        let g_has_group_only = elem.attributes.iter().any(|a| GROUP_ONLY_ATTRS.contains(&a.name.as_str()));
-                        if !g_has_transform && !g_has_group_only && can_merge_attrs(elem, child_elem) {
+                        let g_has_group_only = elem
+                            .attributes
+                            .iter()
+                            .any(|a| GROUP_ONLY_ATTRS.contains(&a.name.as_str()));
+                        if !g_has_transform
+                            && !g_has_group_only
+                            && can_merge_attrs(elem, child_elem)
+                        {
                             merge_group_into_child(doc, id, child_id);
                             changed = true;
                             continue;
@@ -60,7 +68,11 @@ impl Pass for CollapseGroups {
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -73,7 +85,9 @@ fn hoist_children(doc: &mut Document, group_id: NodeId, parent_id: NodeId) {
 
     if let Some(pos) = pos {
         // Replace the group with its children in the parent's child list
-        parent.children.splice(pos..=pos, group_children.iter().copied());
+        parent
+            .children
+            .splice(pos..=pos, group_children.iter().copied());
         // Update parent pointers
         for &child in &group_children {
             doc.node_mut(child).parent = Some(parent_id);
@@ -83,14 +97,15 @@ fn hoist_children(doc: &mut Document, group_id: NodeId, parent_id: NodeId) {
 
 /// Check if group attributes can be safely merged into the child element.
 /// Returns false if there are attribute name conflicts.
-fn can_merge_attrs(
-    group: &crate::ast::Element,
-    child: &crate::ast::Element,
-) -> bool {
+fn can_merge_attrs(group: &crate::ast::Element, child: &crate::ast::Element) -> bool {
     for g_attr in &group.attributes {
         // If the child already has this attribute, don't merge (child value wins, but
         // we'd lose the group's value silently — skip to be safe).
-        if child.attributes.iter().any(|a| a.name == g_attr.name && a.prefix == g_attr.prefix) {
+        if child
+            .attributes
+            .iter()
+            .any(|a| a.name == g_attr.name && a.prefix == g_attr.prefix)
+        {
             return false;
         }
     }
@@ -128,7 +143,8 @@ mod tests {
 
     #[test]
     fn collapses_attr_less_group() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g><rect/><circle r="5"/></g></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g><rect/><circle r="5"/></g></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
@@ -139,7 +155,8 @@ mod tests {
 
     #[test]
     fn merges_single_child_attrs() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g fill="red"><rect width="10"/></g></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g fill="red"><rect width="10"/></g></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
@@ -172,7 +189,10 @@ mod tests {
         CollapseGroups.run(&mut doc);
         CollapseGroups.run(&mut doc);
         let output = serialize(&doc);
-        assert!(!output.contains("<g"), "all groups should be removed: {output}");
+        assert!(
+            !output.contains("<g"),
+            "all groups should be removed: {output}"
+        );
         assert!(output.contains("<rect/>"));
     }
 
@@ -195,25 +215,36 @@ mod tests {
         let mut doc = parse(input).unwrap();
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
         let output = serialize(&doc);
-        assert!(output.contains("<g"), "group with clip-path must be preserved: {output}");
+        assert!(
+            output.contains("<g"),
+            "group with clip-path must be preserved: {output}"
+        );
     }
 
     #[test]
     fn mask_blocks_merge() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g mask="url(#mask1)"><rect/></g></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g mask="url(#mask1)"><rect/></g></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
         let output = serialize(&doc);
-        assert!(output.contains("<g"), "group with mask must be preserved: {output}");
+        assert!(
+            output.contains("<g"),
+            "group with mask must be preserved: {output}"
+        );
     }
 
     #[test]
     fn filter_blocks_merge() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g filter="url(#blur)"><rect/></g></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g filter="url(#blur)"><rect/></g></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
         let output = serialize(&doc);
-        assert!(output.contains("<g"), "group with filter must be preserved: {output}");
+        assert!(
+            output.contains("<g"),
+            "group with filter must be preserved: {output}"
+        );
     }
 
     #[test]
@@ -223,8 +254,14 @@ mod tests {
         // Single child — opacity on group is equivalent to opacity on child
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
-        assert!(!output.contains("<g"), "single-child opacity group should collapse: {output}");
-        assert!(output.contains("opacity=\"0.5\""), "opacity should be on rect: {output}");
+        assert!(
+            !output.contains("<g"),
+            "single-child opacity group should collapse: {output}"
+        );
+        assert!(
+            output.contains("opacity=\"0.5\""),
+            "opacity should be on rect: {output}"
+        );
     }
 
     #[test]
@@ -234,7 +271,10 @@ mod tests {
         // Multi-child — group opacity composites differently than per-element
         assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
         let output = serialize(&doc);
-        assert!(output.contains("<g"), "multi-child opacity group must be preserved: {output}");
+        assert!(
+            output.contains("<g"),
+            "multi-child opacity group must be preserved: {output}"
+        );
     }
 
     #[test]
@@ -245,9 +285,18 @@ mod tests {
         CollapseGroups.run(&mut doc);
         let output = serialize(&doc);
         // Inner group collapsed: stroke moved to rect
-        assert!(output.contains("stroke=\"blue\""), "stroke should be on rect: {output}");
+        assert!(
+            output.contains("stroke=\"blue\""),
+            "stroke should be on rect: {output}"
+        );
         // Outer group preserved: fill="red" inherited by both children
-        assert!(output.contains("fill=\"red\""), "fill should stay on outer group: {output}");
-        assert!(output.contains("<g"), "outer group must be preserved: {output}");
+        assert!(
+            output.contains("fill=\"red\""),
+            "fill should stay on outer group: {output}"
+        );
+        assert!(
+            output.contains("<g"),
+            "outer group must be preserved: {output}"
+        );
     }
 }

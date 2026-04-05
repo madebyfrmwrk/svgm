@@ -1,9 +1,13 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Attributes that can contain color values.
 const COLOR_ATTRS: &[&str] = &[
-    "fill", "stroke", "stop-color", "flood-color", "lighting-color",
+    "fill",
+    "stroke",
+    "stop-color",
+    "flood-color",
+    "lighting-color",
     "color",
 ];
 
@@ -27,15 +31,20 @@ impl Pass for ConvertColors {
                     }
                     if COLOR_ATTRS.contains(&attr.name.as_str())
                         && let Some(shorter) = shorten_color(&attr.value)
-                            && shorter.len() < attr.value.len() {
-                                attr.value = shorter;
-                                changed = true;
-                            }
+                        && shorter.len() < attr.value.len()
+                    {
+                        attr.value = shorter;
+                        changed = true;
+                    }
                 }
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -51,7 +60,9 @@ fn shorten_color(value: &str) -> Option<String> {
     } else if trimmed.starts_with('#') && trimmed.len() == 4 {
         let c: Vec<char> = trimmed.chars().collect();
         Some(format!("#{0}{0}{1}{1}{2}{2}", c[1], c[2], c[3]).to_lowercase())
-    } else { named_to_hex(trimmed).map(|hex| hex.to_string()) };
+    } else {
+        named_to_hex(trimmed).map(|hex| hex.to_string())
+    };
 
     let hex6 = hex6?;
 
@@ -64,9 +75,10 @@ fn shorten_color(value: &str) -> Option<String> {
         best = hex3;
     }
     if let Some(name) = named
-        && name.len() < best.len() {
-            best = name.to_string();
-        }
+        && name.len() < best.len()
+    {
+        best = name.to_string();
+    }
 
     if best.len() < trimmed.len() || best != trimmed.to_lowercase() {
         Some(best)
@@ -79,11 +91,7 @@ fn shorten_color(value: &str) -> Option<String> {
 fn shorten_hex(hex: &str) -> String {
     let hex = hex.to_lowercase();
     let chars: Vec<char> = hex.chars().collect();
-    if chars.len() == 7
-        && chars[1] == chars[2]
-        && chars[3] == chars[4]
-        && chars[5] == chars[6]
-    {
+    if chars.len() == 7 && chars[1] == chars[2] && chars[3] == chars[4] && chars[5] == chars[6] {
         format!("#{}{}{}", chars[1], chars[3], chars[5])
     } else {
         hex

@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 use std::collections::HashSet;
 
 /// Conservative pass: only removes namespace declarations for editor-specific prefixes
@@ -48,7 +48,11 @@ impl Pass for RemoveUnusedNamespaces {
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 

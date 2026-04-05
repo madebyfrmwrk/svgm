@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "svgm", version, about = "SVG minimizer — fast, safe, single-pass SVG optimizer")]
+#[command(
+    name = "svgm",
+    version,
+    about = "SVG minimizer — fast, safe, single-pass SVG optimizer"
+)]
 struct Cli {
     /// Input SVG file(s)
     #[arg(required = true)]
@@ -80,7 +84,13 @@ fn process_file(cli: &Cli, input_path: &PathBuf) -> Result<(), Box<dyn std::erro
                 .unwrap()
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
         );
-        sp.set_message(input_path.file_name().unwrap().to_string_lossy().to_string());
+        sp.set_message(
+            input_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
         sp.enable_steady_tick(std::time::Duration::from_millis(80));
         Some(sp)
     } else {
@@ -98,7 +108,13 @@ fn process_file(cli: &Cli, input_path: &PathBuf) -> Result<(), Box<dyn std::erro
 
     if cli.dry_run {
         if !cli.quiet {
-            print_summary(input_path, input_size, output_size, elapsed, result.iterations);
+            print_summary(
+                input_path,
+                input_size,
+                output_size,
+                elapsed,
+                result.iterations,
+            );
         }
         return Ok(());
     }
@@ -109,7 +125,13 @@ fn process_file(cli: &Cli, input_path: &PathBuf) -> Result<(), Box<dyn std::erro
         let output_path = cli.output.as_ref().unwrap_or(input_path);
         fs::write(output_path, &result.data)?;
         if !cli.quiet {
-            print_summary(input_path, input_size, output_size, elapsed, result.iterations);
+            print_summary(
+                input_path,
+                input_size,
+                output_size,
+                elapsed,
+                result.iterations,
+            );
         }
     }
 

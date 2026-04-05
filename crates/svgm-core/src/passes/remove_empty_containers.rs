@@ -1,10 +1,18 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Container elements that can be removed when empty.
 const REMOVABLE_CONTAINERS: &[&str] = &[
-    "g", "defs", "symbol", "clipPath", "mask", "pattern",
-    "linearGradient", "radialGradient", "filter", "marker",
+    "g",
+    "defs",
+    "symbol",
+    "clipPath",
+    "mask",
+    "pattern",
+    "linearGradient",
+    "radialGradient",
+    "filter",
+    "marker",
 ];
 
 pub struct RemoveEmptyContainers;
@@ -21,25 +29,29 @@ impl Pass for RemoveEmptyContainers {
         for id in ids {
             let node = doc.node(id);
             if let NodeKind::Element(ref elem) = node.kind
-                && REMOVABLE_CONTAINERS.contains(&elem.name.as_str()) {
-                    // Consider empty if no children, or only whitespace text children
-                    let has_meaningful_children = doc.children(id).any(|child| {
-                        match &doc.node(child).kind {
-                            NodeKind::Text(t) => !t.trim().is_empty(),
-                            _ => true,
-                        }
+                && REMOVABLE_CONTAINERS.contains(&elem.name.as_str())
+            {
+                // Consider empty if no children, or only whitespace text children
+                let has_meaningful_children =
+                    doc.children(id).any(|child| match &doc.node(child).kind {
+                        NodeKind::Text(t) => !t.trim().is_empty(),
+                        _ => true,
                     });
-                    if !has_meaningful_children {
-                        // Don't remove if it has an id — it might be referenced
-                        if elem.attr("id").is_none() {
-                            doc.remove(id);
-                            changed = true;
-                        }
+                if !has_meaningful_children {
+                    // Don't remove if it has an id — it might be referenced
+                    if elem.attr("id").is_none() {
+                        doc.remove(id);
+                        changed = true;
                     }
                 }
+            }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 

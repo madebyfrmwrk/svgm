@@ -1,14 +1,37 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Attributes whose values are numeric and can be cleaned up.
 const NUMERIC_ATTRS: &[&str] = &[
-    "width", "height", "x", "y", "x1", "y1", "x2", "y2",
-    "cx", "cy", "r", "rx", "ry", "fx", "fy", "fr",
-    "stroke-width", "stroke-dashoffset", "stroke-miterlimit",
-    "opacity", "fill-opacity", "stroke-opacity", "stop-opacity",
-    "font-size", "letter-spacing", "word-spacing",
-    "baseline-shift", "dx", "dy",
+    "width",
+    "height",
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "fx",
+    "fy",
+    "fr",
+    "stroke-width",
+    "stroke-dashoffset",
+    "stroke-miterlimit",
+    "opacity",
+    "fill-opacity",
+    "stroke-opacity",
+    "stop-opacity",
+    "font-size",
+    "letter-spacing",
+    "word-spacing",
+    "baseline-shift",
+    "dx",
+    "dy",
 ];
 
 pub struct CleanupNumericValues {
@@ -39,22 +62,28 @@ impl Pass for CleanupNumericValues {
                     }
                     if NUMERIC_ATTRS.contains(&attr.name.as_str())
                         && let Some(cleaned) = cleanup_numeric(&attr.value, self.precision)
-                            && cleaned != attr.value {
-                                attr.value = cleaned;
-                                changed = true;
-                            }
+                        && cleaned != attr.value
+                    {
+                        attr.value = cleaned;
+                        changed = true;
+                    }
                     // Also clean viewBox values
                     if attr.name == "viewBox"
                         && let Some(cleaned) = cleanup_viewbox(&attr.value, self.precision)
-                            && cleaned != attr.value {
-                                attr.value = cleaned;
-                                changed = true;
-                            }
+                        && cleaned != attr.value
+                    {
+                        attr.value = cleaned;
+                        changed = true;
+                    }
                 }
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -117,7 +146,6 @@ fn format_number(value: f64) -> String {
     let s = s.trim_end_matches('.');
 
     // Remove leading zero: 0.5 → .5, -0.5 → -.5
-    
 
     if let Some(rest) = s.strip_prefix("0.") {
         format!(".{rest}")

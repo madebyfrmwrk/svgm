@@ -4,9 +4,21 @@ use crate::ast::{Document, NodeId, NodeKind};
 /// For pure SVG, self-closing is always valid, but we avoid it for
 /// container elements that commonly have children.
 const VOID_SVG_ELEMENTS: &[&str] = &[
-    "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
-    "use", "image", "stop", "animate", "animateTransform", "animateMotion",
-    "set", "mpath",
+    "path",
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "use",
+    "image",
+    "stop",
+    "animate",
+    "animateTransform",
+    "animateMotion",
+    "set",
+    "mpath",
 ];
 
 /// Serialize a Document to a minified SVG string.
@@ -120,9 +132,23 @@ fn serialize_node(doc: &Document, id: NodeId, out: &mut String) {
 fn has_potential_children(name: &str) -> bool {
     matches!(
         name,
-        "svg" | "g" | "defs" | "symbol" | "clipPath" | "mask" | "pattern"
-            | "linearGradient" | "radialGradient" | "filter" | "marker"
-            | "text" | "tspan" | "textPath" | "a" | "switch" | "foreignObject"
+        "svg"
+            | "g"
+            | "defs"
+            | "symbol"
+            | "clipPath"
+            | "mask"
+            | "pattern"
+            | "linearGradient"
+            | "radialGradient"
+            | "filter"
+            | "marker"
+            | "text"
+            | "tspan"
+            | "textPath"
+            | "a"
+            | "switch"
+            | "foreignObject"
     )
 }
 
@@ -166,7 +192,8 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_groups() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g id="a"><g id="b"><rect/></g></g></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g id="a"><g id="b"><rect/></g></g></svg>"#;
         let doc = parse(input).unwrap();
         let output = serialize(&doc);
         let doc2 = parse(&output).unwrap();
@@ -185,7 +212,8 @@ mod tests {
 
     #[test]
     fn text_with_entities() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><text>a &amp; b &lt; c</text></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text>a &amp; b &lt; c</text></svg>"#;
         let doc = parse(input).unwrap();
         let output = serialize(&doc);
         // xmlparser decodes entities, serializer re-encodes them
@@ -194,7 +222,8 @@ mod tests {
 
     #[test]
     fn self_closing_void_elements() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/><circle r="5"/></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/><circle r="5"/></svg>"#;
         let doc = parse(input).unwrap();
         let output = serialize(&doc);
         assert!(output.contains("<path "));

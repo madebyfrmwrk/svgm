@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 /// Opt-in pass: removes <desc> elements.
 /// NOT included in default preset because <desc> carries accessibility semantics.
@@ -15,12 +15,17 @@ impl Pass for RemoveDesc {
         let ids = doc.traverse();
         for id in ids {
             if let NodeKind::Element(ref elem) = doc.node(id).kind
-                && matches!(elem.name.as_str(), "desc" | "title") {
-                    doc.remove(id);
-                    changed = true;
-                }
+                && matches!(elem.name.as_str(), "desc" | "title")
+            {
+                doc.remove(id);
+                changed = true;
+            }
         }
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::ast::{Document, NodeKind};
 use super::{Pass, PassResult};
+use crate::ast::{Document, NodeKind};
 
 pub struct RemoveUnknownsAndDefaults;
 
@@ -83,9 +83,7 @@ impl Pass for RemoveUnknownsAndDefaults {
                     }
 
                     // Check fill removal exceptions
-                    if attr.name == "fill"
-                        && SKIP_FILL_REMOVAL.contains(&elem_name.as_str())
-                    {
+                    if attr.name == "fill" && SKIP_FILL_REMOVAL.contains(&elem_name.as_str()) {
                         return true;
                     }
 
@@ -103,7 +101,11 @@ impl Pass for RemoveUnknownsAndDefaults {
             }
         }
 
-        if changed { PassResult::Changed } else { PassResult::Unchanged }
+        if changed {
+            PassResult::Changed
+        } else {
+            PassResult::Unchanged
+        }
     }
 }
 
@@ -115,11 +117,15 @@ mod tests {
 
     #[test]
     fn removes_default_fill_black() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="black" width="10"/></svg>"#;
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="black" width="10"/></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
-        assert!(!output.contains("fill"), "default fill=black should be removed: {output}");
+        assert!(
+            !output.contains("fill"),
+            "default fill=black should be removed: {output}"
+        );
     }
 
     #[test]
@@ -128,7 +134,10 @@ mod tests {
         let mut doc = parse(input).unwrap();
         assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
-        assert!(!output.contains("opacity"), "default opacities should be removed: {output}");
+        assert!(
+            !output.contains("opacity"),
+            "default opacities should be removed: {output}"
+        );
     }
 
     #[test]
@@ -137,14 +146,20 @@ mod tests {
         let mut doc = parse(input).unwrap();
         assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
-        assert!(!output.contains("stroke"), "default stroke=none should be removed: {output}");
+        assert!(
+            !output.contains("stroke"),
+            "default stroke=none should be removed: {output}"
+        );
     }
 
     #[test]
     fn keeps_non_default_fill() {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="red"/></svg>"#;
         let mut doc = parse(input).unwrap();
-        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
     }
 
     #[test]
@@ -152,15 +167,22 @@ mod tests {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg" fill="black"><rect/></svg>"#;
         let mut doc = parse(input).unwrap();
         // fill="black" on <svg> should be kept — it's inherited by children
-        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
     }
 
     #[test]
     fn removes_hex_default_fill() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"#000000\" d=\"M0 0\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"#000000\" d=\"M0 0\"/></svg>";
         let mut doc = parse(input).unwrap();
         assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
-        assert!(!output.contains("fill"), "fill=#000000 should be removed: {output}");
+        assert!(
+            !output.contains("fill"),
+            "fill=#000000 should be removed: {output}"
+        );
     }
 }
