@@ -33,15 +33,13 @@
 
 ## About
 
-SVG files exported from tools like Figma, Illustrator, and Inkscape carry metadata, redundant attributes, verbose path data, and unnecessary structure. svgm strips all of that in a single invocation.
+SVG files exported from tools like Figma, Illustrator, and Inkscape often include metadata, redundant attributes, unnecessary wrapper structure, and verbose path data.
 
-Like [oxlint](https://oxc.rs) is to ESLint, svgm is a ground-up Rust rewrite of the SVG optimization pipeline. Native speed, single binary, no runtime dependencies.
+[SVGO](https://github.com/svg/svgo) has been the standard SVG optimizer for years. svgm takes a different approach: a native Rust optimizer designed around fixed-point convergence, safe defaults, and a modern CLI. Like [oxlint](https://oxc.rs) is to ESLint — same problem, different architecture.
 
 ### Fixed-point convergence
 
-Most SVG optimizers run plugins in a fixed sequence. When a later plugin creates an opportunity for an earlier one, that opportunity is missed until the next run.
-
-svgm takes a different approach: all passes run over an in-memory AST in a loop until the document stabilizes. No re-parsing between iterations. One invocation, fully converged.
+In some optimizers, additional runs can still reduce output further because later passes create opportunities for earlier ones. svgm is designed to converge in a single invocation by running optimization passes over the in-memory AST until the document stabilizes.
 
 ```
 $ svgm icon.svg
@@ -49,6 +47,8 @@ $ svgm icon.svg
   icon.svg
   13.5 KiB -> 6.6 KiB (51.1% smaller)  0ms  3 passes
 ```
+
+No re-parsing between iterations. No manual multipass flag. One invocation, fixed-point optimization.
 
 ## Install
 
@@ -115,7 +115,7 @@ xcode.svg                    36.7%        43.8%
 
 </details>
 
-svgm is approaching SVGO-class compression while running as a single native binary at over twice the speed. Additional compression passes are actively being developed.
+svgm is closing the compression gap while staying significantly faster and shipping as a single native binary. Additional passes are actively being developed.
 
 ## How it works
 
@@ -132,7 +132,7 @@ SVG string ---------> AST tree ---------> AST tree -----------> SVG string
 2. **Optimize** — Run all passes in a loop until no pass reports a change (max 10 iterations)
 3. **Serialize** — Write the AST back as a minified SVG string
 
-Passes operate directly on the in-memory AST rather than re-serializing and re-parsing between iterations. This is what makes fixed-point convergence practical.
+Passes operate directly on the in-memory AST rather than re-serializing and re-parsing between iterations.
 
 ### Optimization passes
 
