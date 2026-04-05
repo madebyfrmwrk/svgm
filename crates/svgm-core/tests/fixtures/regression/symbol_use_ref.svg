@@ -1,0 +1,9 @@
+<!-- SVGO #2084: symbol removed despite being used -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200">
+  <defs>
+    <symbol id="icon" viewBox="0 0 24 24">
+      <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+    </symbol>
+  </defs>
+  <use xlink:href="#icon" width="48" height="48"/>
+</svg>

@@ -1,0 +1,9 @@
+<!-- SVGO #1728: foreignObject content -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+  <foreignObject x="10" y="10" width="180" height="180">
+    <div xmlns="http://www.w3.org/1999/xhtml">
+      <p>Hello world</p>
+      <span>This should not be self-closed</span>
+    </div>
+  </foreignObject>
+</svg>

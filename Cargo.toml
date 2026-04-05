@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/svgm-core", "crates/svgm-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shaanshivanandan/svgm"
+
+[workspace.dependencies]
+svgm-core = { path = "crates/svgm-core" }
+xmlparser = "0.13"
+svgtypes = "0.16"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+console = "0.15"
+thiserror = "2"

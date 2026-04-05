@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+<!-- Generator: Adobe Illustrator 25.0.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200">
+  <!-- Background -->
+  <metadata>
+    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description>
+        <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test SVG</dc:title>
+      </rdf:Description>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview inkscape:zoom="1" inkscape:cx="100" inkscape:cy="100"/>
+  <rect width="200" height="200" fill="white"/>
+  <!-- Main content -->
+  <g inkscape:label="Layer 1" inkscape:groupmode="layer">
+    <circle cx="100" cy="100" r="50" fill="rgb(255, 0, 0)"/>
+    <!-- Decorative element -->
+    <rect x="50.000px" y="50.000px" width="100.000" height="100.000" fill="#aabbcc" stroke="#ff0000" class="" opacity="1.0000"/>
+  </g>
+  <g></g>
+  <defs></defs>
+</svg>

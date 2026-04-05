@@ -1,0 +1,12 @@
+[package]
+name = "svgm-core"
+description = "SVG optimization engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xmlparser.workspace = true
+svgtypes.workspace = true
+thiserror.workspace = true
