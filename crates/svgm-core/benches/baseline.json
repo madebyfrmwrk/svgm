@@ -1,0 +1,28 @@
+{
+  "files": {
+    "test-1.svg": {
+      "output_bytes": 9745
+    },
+    "test-2.svg": {
+      "output_bytes": 4765
+    },
+    "test-3.svg": {
+      "output_bytes": 12792
+    },
+    "test-4.svg": {
+      "output_bytes": 2718
+    },
+    "test-5.svg": {
+      "output_bytes": 14106
+    },
+    "test-6.svg": {
+      "output_bytes": 27902
+    },
+    "test-7-transforms.svg": {
+      "output_bytes": 483
+    },
+    "test-8-figma-transforms.svg": {
+      "output_bytes": 1052
+    }
+  }
+}

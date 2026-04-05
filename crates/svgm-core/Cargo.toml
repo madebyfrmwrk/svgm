@@ -10,3 +10,11 @@ repository.workspace = true
 xmlparser.workspace = true
 svgtypes.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bench]]
+name = "corpus"
+harness = false

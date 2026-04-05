@@ -4,3 +4,4 @@ Cargo.lock
 *.swo
 .DS_Store
 CLAUDE.md
+crates/svgm-core/benches/report.json
