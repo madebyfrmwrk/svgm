@@ -15,10 +15,12 @@ pub mod remove_editor_data;
 pub mod remove_empty_attrs;
 pub mod remove_empty_containers;
 pub mod remove_empty_text;
+pub mod remove_hidden_elems;
 pub mod remove_metadata;
 pub mod remove_proc_inst;
 pub mod remove_unknowns_and_defaults;
 pub mod remove_unused_namespaces;
+pub mod sort_attrs;
 
 use crate::ast::Document;
 
@@ -52,6 +54,7 @@ pub fn default_passes() -> Vec<Box<dyn Pass>> {
         Box::new(remove_empty_attrs::RemoveEmptyAttrs),
         Box::new(remove_empty_text::RemoveEmptyText),
         Box::new(remove_empty_containers::RemoveEmptyContainers),
+        Box::new(remove_hidden_elems::RemoveHiddenElems),
         Box::new(remove_unused_namespaces::RemoveUnusedNamespaces),
         Box::new(cleanup_attrs::CleanupAttrs),
         Box::new(cleanup_numeric_values::CleanupNumericValues::default()),
@@ -63,6 +66,7 @@ pub fn default_passes() -> Vec<Box<dyn Pass>> {
         Box::new(cleanup_ids::CleanupIds),
         Box::new(convert_path_data::ConvertPathData::default()),
         Box::new(merge_paths::MergePaths),
+        Box::new(sort_attrs::SortAttrs),
         Box::new(minify_whitespace::MinifyWhitespace),
     ]
 }
