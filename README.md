@@ -4,7 +4,7 @@
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/svgm-light.svg">
       <source media="(prefers-color-scheme: light)" srcset="assets/svgm-dark.svg">
-      <img alt="svgm" src="assets/svgm-dark.svg" height="48">
+      <img alt="svgm" src="assets/svgm-dark.svg" height="36">
     </picture>
   </a>
   <br>
