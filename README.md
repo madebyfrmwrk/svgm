@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  The SVG optimizer, rewritten in Rust.
+  SVG optimization, rewritten in Rust.
 </p>
 
 <p align="center">
