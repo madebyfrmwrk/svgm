@@ -75,7 +75,10 @@ fn synthetic_nested_empty_groups() {
     ));
     assert_valid_svg(&output, "nested_empty_groups");
     // All <g> elements should be collapsed (empty ones removed, single-child ones unwrapped)
-    assert!(output.contains("<rect"), "rect should be preserved");
+    assert!(
+        output.contains("<rect") || output.contains("<path"),
+        "rect (or its path equivalent) should be preserved"
+    );
     let g_count = output.matches("<g>").count() + output.matches("<g ").count();
     assert_eq!(
         g_count, 0,
@@ -205,13 +208,23 @@ fn path_torture_structural_equivalence() {
             let input = fs::read_to_string(&path).unwrap();
             let output = svgm_core::optimize(&input).unwrap().data;
 
-            // Path count should not change (safety invariant for convertPathData;
-            // later passes like mergePaths may intentionally change path count)
-            let input_paths = input.matches("<path").count();
-            let output_paths = output.matches("<path").count();
-            assert_eq!(
-                input_paths, output_paths,
-                "{name}: path count changed from {input_paths} to {output_paths}"
+            // Total path-like element count should not decrease. convertShapeToPath
+            // may increase path count by converting shapes to paths, but no pass
+            // should remove paths. (mergePaths may later reduce count intentionally.)
+            let count_path_like = |s: &str| {
+                s.matches("<path").count()
+                    + s.matches("<rect").count()
+                    + s.matches("<circle").count()
+                    + s.matches("<ellipse").count()
+                    + s.matches("<line").count()
+                    + s.matches("<polyline").count()
+                    + s.matches("<polygon").count()
+            };
+            let input_count = count_path_like(&input);
+            let output_count = count_path_like(&output);
+            assert!(
+                output_count >= input_count,
+                "{name}: path-like element count decreased from {input_count} to {output_count}"
             );
         }
     }
