@@ -26,8 +26,6 @@
 <div align="center">
 
 [![MIT licensed][license-badge]][license-url]
-[![Crate][crates-badge]][crates-url]
-[![Build Status][ci-badge]][ci-url]
 
 </div>
 
@@ -256,7 +254,3 @@ Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
 
 [license-badge]: https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg
 [license-url]: https://github.com/builtbyfrmwrk/svgm/blob/main/LICENSE-MIT
-[crates-badge]: https://img.shields.io/crates/v/svgm.svg
-[crates-url]: https://crates.io/crates/svgm
-[ci-badge]: https://github.com/builtbyfrmwrk/svgm/actions/workflows/ci.yml/badge.svg
-[ci-url]: https://github.com/builtbyfrmwrk/svgm/actions
