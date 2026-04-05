@@ -6,6 +6,7 @@ pub mod convert_colors;
 pub mod convert_path_data;
 pub mod convert_shape_to_path;
 pub mod convert_transform;
+pub mod merge_paths;
 pub mod minify_whitespace;
 pub mod remove_comments;
 pub mod remove_desc;
@@ -61,6 +62,7 @@ pub fn default_passes() -> Vec<Box<dyn Pass>> {
         Box::new(collapse_groups::CollapseGroups),
         Box::new(cleanup_ids::CleanupIds),
         Box::new(convert_path_data::ConvertPathData::default()),
+        Box::new(merge_paths::MergePaths),
         Box::new(minify_whitespace::MinifyWhitespace),
     ]
 }
