@@ -160,15 +160,20 @@ impl Pass for InlineStyles {
             if rule.selector_kind == SelectorKind::Unsupported {
                 continue;
             }
-            rule.matched_elements = match_selector(&rule.selector, &rule.selector_kind, &class_map, &id_map, &ids, doc);
+            rule.matched_elements = match_selector(
+                &rule.selector,
+                &rule.selector_kind,
+                &class_map,
+                &id_map,
+                &ids,
+                doc,
+            );
         }
 
         // Step 6: Remove unused rules (supported selectors matching zero elements).
         let mut any_removed = false;
         for rule in &mut rules {
-            if rule.selector_kind != SelectorKind::Unsupported
-                && rule.matched_elements.is_empty()
-            {
+            if rule.selector_kind != SelectorKind::Unsupported && rule.matched_elements.is_empty() {
                 rule.removed = true;
                 any_removed = true;
             }
@@ -274,10 +279,8 @@ impl Pass for InlineStyles {
         }
 
         // Step 9: Write back remaining CSS or remove <style> elements.
-        let remaining_rules: Vec<&CssRule> = rules
-            .iter()
-            .filter(|r| !r.removed && !r.consumed)
-            .collect();
+        let remaining_rules: Vec<&CssRule> =
+            rules.iter().filter(|r| !r.removed && !r.consumed).collect();
 
         let any_style_changed = if remaining_rules.is_empty() {
             // Remove all <style> elements
@@ -432,7 +435,10 @@ fn strip_css_comments(css: &str) -> String {
 
 /// Find a character in the string starting at `from`.
 fn find_char(s: &str, from: usize, ch: u8) -> Option<usize> {
-    s.as_bytes()[from..].iter().position(|&b| b == ch).map(|p| p + from)
+    s.as_bytes()[from..]
+        .iter()
+        .position(|&b| b == ch)
+        .map(|p| p + from)
 }
 
 /// Find the matching '}' for a '{' at position `open`, handling nesting.
@@ -656,13 +662,8 @@ fn parse_simple_selector(sel: &str) -> (Option<String>, Option<String>, Option<S
     let mut current = sel;
 
     // Extract element name (starts with a letter, before . or #)
-    if !current.is_empty()
-        && !current.starts_with('.')
-        && !current.starts_with('#')
-    {
-        let end = current
-            .find(['.', '#'])
-            .unwrap_or(current.len());
+    if !current.is_empty() && !current.starts_with('.') && !current.starts_with('#') {
+        let end = current.find(['.', '#']).unwrap_or(current.len());
         elem_name = Some(current[..end].to_string());
         current = &current[end..];
     }
@@ -749,7 +750,8 @@ mod tests {
 
     #[test]
     fn no_style_element_unchanged() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>";
         let (result, _) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
     }

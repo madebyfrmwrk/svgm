@@ -151,13 +151,11 @@ fn should_remove(doc: &Document, nid: NodeId, elem: &crate::ast::Element, name: 
                 return true;
             }
         }
-        "path" => {
-            match elem.attr("d") {
-                None => return true,
-                Some(d) if d.trim().is_empty() => return true,
-                _ => {}
-            }
-        }
+        "path" => match elem.attr("d") {
+            None => return true,
+            Some(d) if d.trim().is_empty() => return true,
+            _ => {}
+        },
         "line" => {
             let x1 = parse_coord(elem.attr("x1"));
             let y1 = parse_coord(elem.attr("y1"));
@@ -249,7 +247,8 @@ mod tests {
 
     #[test]
     fn removes_zero_width_rect() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"0\" height=\"10\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"0\" height=\"10\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<rect"));
@@ -257,7 +256,8 @@ mod tests {
 
     #[test]
     fn removes_zero_height_rect() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"0\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"0\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<rect"));
@@ -265,7 +265,8 @@ mod tests {
 
     #[test]
     fn removes_zero_radius_circle() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\" r=\"0\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\" r=\"0\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<circle"));
@@ -273,8 +274,7 @@ mod tests {
 
     #[test]
     fn removes_circle_missing_r() {
-        let input =
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\"/></svg>";
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<circle"));
@@ -306,8 +306,7 @@ mod tests {
 
     #[test]
     fn removes_path_empty_d() {
-        let input =
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"\"/></svg>";
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<path"));
@@ -438,7 +437,8 @@ mod tests {
 
     #[test]
     fn preserves_visible_rect() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>";
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>";
         let (result, _) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
     }

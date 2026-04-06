@@ -78,12 +78,15 @@ fn minify_css(css: &str) -> String {
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
             }
-            let after = if i < bytes.len() { Some(bytes[i]) } else { None };
+            let after = if i < bytes.len() {
+                Some(bytes[i])
+            } else {
+                None
+            };
 
             // Only keep a space if both sides are "word-like" characters
             // Remove space around structural chars: { } : ; ,
-            let structural =
-                |b: Option<u8>| matches!(b, Some(b'{' | b'}' | b':' | b';' | b','));
+            let structural = |b: Option<u8>| matches!(b, Some(b'{' | b'}' | b':' | b';' | b','));
             if !structural(before) && !structural(after) {
                 result.push(' ');
             }

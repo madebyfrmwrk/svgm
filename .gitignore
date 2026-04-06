@@ -5,3 +5,4 @@ Cargo.lock
 .DS_Store
 CLAUDE.md
 crates/svgm-core/benches/report.json
+.idea/

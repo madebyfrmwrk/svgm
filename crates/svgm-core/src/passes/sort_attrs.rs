@@ -51,8 +51,7 @@ mod tests {
 
     #[test]
     fn sorts_unsorted_attributes() {
-        let input =
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"5\" fill=\"red\"/></svg>";
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"5\" fill=\"red\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         // fill < height < width
@@ -61,8 +60,7 @@ mod tests {
 
     #[test]
     fn already_sorted_unchanged() {
-        let input =
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"red\" height=\"5\" width=\"10\"/></svg>";
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"red\" height=\"5\" width=\"10\"/></svg>";
         let (result, _) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
     }
@@ -78,8 +76,7 @@ mod tests {
 
     #[test]
     fn single_attribute_unchanged() {
-        let input =
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\"/></svg>";
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\"/></svg>";
         let (result, _) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
     }
