@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+
+- **Safety presets** (`--preset safe|balanced|aggressive`): control optimization aggressiveness. `safe` runs only removal/normalization passes (17 passes). `balanced` runs the full pass set (24 passes, default — same as prior behavior). `aggressive` uses the full pass set with lower numeric precision (2 instead of 3).
+- **Config file support** (`svgm.config.toml`): per-project configuration with `preset`, `precision`, and per-pass `[passes]` overrides. Auto-discovered by walking up from the input file's directory.
+- `--precision N` flag to override numeric rounding precision on any preset.
+- `--config PATH` flag to specify an explicit config file path.
+- `--no-config` flag to skip config file auto-discovery.
+- New public API: `svgm_core::optimize_with_config(input, &config)` for programmatic preset/precision control.
+- `svgm_core::Config` and `svgm_core::Preset` types exported from the core crate.
+
+### Changed
+
+- `removeDesc` remains opt-in only — not included in any preset. Enable via config file `removeDesc = true`.
+- Default behavior is unchanged (`balanced` preset matches the prior full pass set at precision 3).
+
 ## 0.1.3
 
 ### Added
