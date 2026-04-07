@@ -1,0 +1,10 @@
+# svgm configuration
+# Copy to svgm.config.toml in your project root.
+# svgm auto-discovers this by walking up from the input file.
+
+# preset = "balanced"    # safe | balanced | aggressive
+# precision = 3          # decimal digits (default: 3, or 2 with aggressive)
+
+[passes]
+# removeDesc = true       # opt-in: strip <desc> and <title>
+# collapseGroups = false   # opt-out: keep <g> wrappers as-is

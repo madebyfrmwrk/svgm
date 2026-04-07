@@ -30,22 +30,31 @@ impl From<CliPreset> for svgm_core::Preset {
 #[command(
     name = "svgm",
     version,
-    about = "SVG minimizer — fast, safe, single-pass SVG optimizer"
+    about = "SVG minimizer — fast, safe, fixed-point convergence SVG optimizer",
+    after_help = "When piped (stdout is not a terminal), output goes to stdout automatically.\n\
+                  Config: place svgm.config.toml in your project root for per-project settings."
 )]
 struct Cli {
-    /// Input SVG file(s) or directories
+    /// SVG file(s) to optimize, or a directory with -r
     #[arg(required = true)]
     input: Vec<PathBuf>,
 
-    /// Output file or directory (default: overwrite in place; prints to stdout if piped)
+    /// Write output to PATH instead of overwriting in place
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Optimization preset [safe: removal/normalization only, balanced: full optimization, aggressive: lower precision]
-    #[arg(long, value_enum)]
+    /// Optimization preset [default: balanced]
+    #[arg(
+        long,
+        value_enum,
+        long_help = "Optimization preset [default: balanced]\n\n  \
+                     safe:       removal and normalization only (17 passes)\n  \
+                     balanced:   full optimization (24 passes)\n  \
+                     aggressive: full optimization, lower precision"
+    )]
     preset: Option<CliPreset>,
 
-    /// Numeric precision for rounding (default: 3 for safe/balanced, 2 for aggressive)
+    /// Decimal digits for numeric rounding [default: 3, or 2 with aggressive]
     #[arg(long, value_name = "N")]
     precision: Option<u32>,
 
@@ -57,11 +66,11 @@ struct Cli {
     #[arg(long)]
     no_config: bool,
 
-    /// Process directories recursively
+    /// Recursively optimize all SVGs in a directory
     #[arg(short, long)]
     recursive: bool,
 
-    /// Print to stdout instead of overwriting
+    /// Write result to stdout instead of overwriting the file
     #[arg(long)]
     stdout: bool,
 
@@ -69,7 +78,7 @@ struct Cli {
     #[arg(long)]
     stats: bool,
 
-    /// Show what would change without writing
+    /// Preview size reduction without writing any files
     #[arg(long)]
     dry_run: bool,
 

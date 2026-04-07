@@ -3,13 +3,13 @@ members = ["crates/svgm-core", "crates/svgm-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/madebyfrmwrk/svgm"
 
 [workspace.dependencies]
-svgm-core = { path = "crates/svgm-core", version = "0.2.0" }
+svgm-core = { path = "crates/svgm-core", version = "0.2.1" }
 xmlparser = "0.13"
 svgtypes = "0.16"
 clap = { version = "4", features = ["derive"] }

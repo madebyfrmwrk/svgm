@@ -104,7 +104,7 @@ removeDesc = true          # opt-in: strip <desc> and <title>
 convertShapeToPath = false  # opt-out: disable a specific pass
 ```
 
-svgm auto-discovers the config by walking up from the input file's directory. Use `--config path` to specify explicitly, or `--no-config` to skip.
+svgm auto-discovers the config by walking up from the input file's directory. Use `--config path` to specify explicitly, or `--no-config` to skip. See [`svgm.config.example.toml`](svgm.config.example.toml) for a starter template.
 
 ## Benchmarks
 

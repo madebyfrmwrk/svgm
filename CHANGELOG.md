@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+### Added
+
+- 18 CLI integration tests covering file operations, stdout/pipe behavior, recursive mode, error cases, file filtering, and config discovery.
+- Example config file (`svgm.config.example.toml`) as a starter template.
+
+### Improved
+
+- Polished `--help` text: clearer flag descriptions, preset breakdown in long help, pipe behavior and config hints in after-help.
+- Fixed "single-pass" → "fixed-point convergence" in CLI about text.
+
 ## 0.2.0
 
 ### Added
