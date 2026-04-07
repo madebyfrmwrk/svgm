@@ -49,6 +49,14 @@ fn main() {
         std::process::exit(1);
     }
 
+    if cli.input.len() > 1 && cli.stdout {
+        eprintln!(
+            "{} cannot use --stdout with multiple input files",
+            style("error:").red().bold()
+        );
+        std::process::exit(1);
+    }
+
     let mut exit_code = 0;
     for input_path in &cli.input {
         if let Err(e) = process_file(&cli, input_path) {
@@ -72,9 +80,11 @@ fn process_file(cli: &Cli, input_path: &PathBuf) -> Result<(), Box<dyn std::erro
     // Determine where output goes:
     // --stdout flag → stdout
     // -o path → that path
-    // piped (not a terminal) → stdout
-    // otherwise → overwrite input file in place (SVGO default behavior)
-    let write_to_stdout = cli.stdout || (cli.output.is_none() && !io::stdout().is_terminal());
+    // single file + piped (not a terminal) → stdout
+    // otherwise → overwrite input file in place
+    let multi_file = cli.input.len() > 1;
+    let write_to_stdout =
+        cli.stdout || (cli.output.is_none() && !multi_file && !io::stdout().is_terminal());
 
     // Show spinner unless quiet or writing to stdout
     let spinner = if !cli.quiet && !write_to_stdout {
