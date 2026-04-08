@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,6 +49,32 @@ jobs:
         with:
           name: svgm-${{ matrix.target }}
           path: svgm-${{ matrix.target }}.*
+
+  wasm:
+    name: Publish WASM to npm
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - run: wasm-pack build crates/svgm-wasm --target web
+      - name: Set npm package name
+        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='@frmwrksoftware/wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
+        working-directory: crates/svgm-wasm
+      - name: Verify package name
+        run: node -e "const p = require('./pkg/package.json'); if (p.name !== '@frmwrksoftware/wasm') throw new Error('unexpected name: ' + p.name)"
+        working-directory: crates/svgm-wasm
+      - run: npm publish --access public --provenance
+        working-directory: crates/svgm-wasm/pkg
 
   release:
     name: Create Release

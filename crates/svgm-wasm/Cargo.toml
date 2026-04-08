@@ -1,0 +1,23 @@
+[package]
+name = "svgm-wasm"
+description = "svgm SVG optimizer — WebAssembly build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+svgm-core.workspace = true
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]

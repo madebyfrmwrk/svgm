@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/svgm-core", "crates/svgm-cli"]
+members = ["crates/svgm-core", "crates/svgm-cli", "crates/svgm-wasm"]
+default-members = ["crates/svgm-core", "crates/svgm-cli"]
 resolver = "2"
 
 [workspace.package]

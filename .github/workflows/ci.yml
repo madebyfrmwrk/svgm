@@ -21,9 +21,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo build --release
+      - run: cargo clippy --workspace --exclude svgm-wasm -- -D warnings
+      - run: cargo test --workspace --exclude svgm-wasm
+      - run: cargo build --release --workspace --exclude svgm-wasm
       - name: Benchmark regression check
         if: matrix.os == 'ubuntu-latest'
         run: cargo bench -p svgm-core
+
+  wasm:
+    name: WASM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - run: wasm-pack build crates/svgm-wasm --target web
+      - name: Set npm package name
+        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='@frmwrksoftware/wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
+        working-directory: crates/svgm-wasm
+      - run: wasm-pack test --headless --chrome crates/svgm-wasm
