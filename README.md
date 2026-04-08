@@ -37,11 +37,11 @@
 
 SVG files exported from tools like Figma, Illustrator, and Inkscape often include metadata, redundant attributes, unnecessary wrapper structure, and verbose path data.
 
-[SVGO](https://github.com/svg/svgo) has been the standard SVG optimizer for years. svgm takes a different approach: a native Rust optimizer designed around fixed-point convergence, safe defaults, and a modern CLI. Like [oxlint](https://oxc.rs) for ESLint, svgm targets the same problem with a different architecture.
+[SVGO](https://github.com/svg/svgo) has been the standard SVG optimizer for years. SVGM takes a different approach: a native Rust optimizer designed around fixed-point convergence, safe defaults, and a modern CLI. Like [oxlint](https://oxc.rs) for ESLint, SVGM targets the same problem with a different architecture.
 
 ### Fixed-point convergence
 
-In some optimizers, additional runs can still reduce output further because later passes create opportunities for earlier ones. svgm is designed to converge in a single invocation by running optimization passes over the in-memory AST until the document stabilizes.
+In some optimizers, additional runs can still reduce output further because later passes create opportunities for earlier ones. SVGM is designed to converge in a single invocation by running optimization passes over the in-memory AST until the document stabilizes.
 
 ```
 $ svgm icon.svg
@@ -106,13 +106,13 @@ removeDesc = true          # opt-in: strip <desc> and <title>
 convertShapeToPath = false  # opt-out: disable a specific pass
 ```
 
-svgm auto-discovers the config by walking up from the input file's directory. Use `--config path` to specify explicitly, or `--no-config` to skip. See [`svgm.config.example.toml`](svgm.config.example.toml) for a starter template.
+SVGM auto-discovers the config by walking up from the input file's directory. Use `--config path` to specify explicitly, or `--no-config` to skip. See [`svgm.config.example.toml`](svgm.config.example.toml) for a starter template.
 
 ## Benchmarks
 
 100 real-world SVG logos (Figma, Illustrator, Inkscape, svgrepo exports). 902.7 KiB total original size.
 
-| | **svgm** | **SVGO** |
+| | **SVGM** | **SVGO** |
 |:--|:--|:--|
 | **Compression** | 14.9% | 18.2% |
 | **Median time** | 110ms | 291ms |
@@ -121,7 +121,7 @@ svgm auto-discovers the config by walking up from the input file's directory. Us
 
 Full benchmark details at [svgm.dev/docs/benchmarks](https://svgm.dev/docs/benchmarks).
 
-svgm ships as a single native binary. The ~3 point compression gap is actively being closed.
+SVGM ships as a single native binary. The ~3 point compression gap is actively being closed.
 
 ## How it works
 
@@ -182,7 +182,7 @@ Passes operate directly on the in-memory AST, avoiding repeated serialize/parse 
 
 ### Safety
 
-svgm is conservative by default:
+SVGM is conservative by default:
 
 - `<desc>` and `<title>` are **preserved** (accessibility semantics)
 - `<symbol>` and `<defs>` with `id` attributes are **never removed** (may be referenced)
@@ -238,7 +238,7 @@ svgm/
 
 ## Contributing
 
-svgm is early, but already usable. Contributions and real-world SVG edge cases are especially helpful.
+SVGM is early, but already usable. Contributions and real-world SVG edge cases are especially helpful.
 
 ```bash
 git clone https://github.com/madebyfrmwrk/svgm.git
@@ -247,7 +247,7 @@ cargo test --workspace
 cargo clippy --workspace  # must pass clean
 ```
 
-If you find an SVG that svgm corrupts or handles worse than expected, please [open an issue](https://github.com/madebyfrmwrk/svgm/issues) with the SVG attached.
+If you find an SVG that SVGM corrupts or handles worse than expected, please [open an issue](https://github.com/madebyfrmwrk/svgm/issues) with the SVG attached.
 
 ## License
 
