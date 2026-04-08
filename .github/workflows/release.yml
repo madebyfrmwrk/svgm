@@ -65,10 +65,12 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - run: wasm-pack build crates/svgm-wasm --target web
       - name: Set npm package name
-        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='@frmwrksoftware/wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='@frmwrksoftware/wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
         working-directory: crates/svgm-wasm
       - name: Verify package name
-        run: node -e "const p = require('./pkg/package.json'); if (p.name !== '@frmwrksoftware/wasm') throw new Error('unexpected name: ' + p.name)"
+        run: |
+          node -e "const p = require('./pkg/package.json'); if (p.name !== '@frmwrksoftware/wasm') throw new Error('unexpected name: ' + p.name)"
         working-directory: crates/svgm-wasm
       - run: npm publish --access public
         working-directory: crates/svgm-wasm/pkg
