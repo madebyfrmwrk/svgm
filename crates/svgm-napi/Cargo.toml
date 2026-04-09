@@ -1,0 +1,18 @@
+[package]
+name = "svgm-napi"
+description = "svgm SVG optimizer — Node.js native addon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+svgm-core.workspace = true
+napi = "3"
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

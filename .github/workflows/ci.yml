@@ -21,9 +21,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --exclude svgm-wasm -- -D warnings
-      - run: cargo test --workspace --exclude svgm-wasm
-      - run: cargo build --release --workspace --exclude svgm-wasm
+      - run: cargo clippy --workspace --exclude svgm-wasm --exclude svgm-napi -- -D warnings
+      - run: cargo test --workspace --exclude svgm-wasm --exclude svgm-napi
+      - run: cargo build --release --workspace --exclude svgm-wasm --exclude svgm-napi
       - name: Benchmark regression check
         if: matrix.os == 'ubuntu-latest'
         run: cargo bench -p svgm-core
@@ -44,3 +44,20 @@ jobs:
         run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='svgm-wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
         working-directory: crates/svgm-wasm
       - run: wasm-pack test --headless --chrome crates/svgm-wasm
+
+  napi:
+    name: NAPI build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm install
+        working-directory: crates/svgm-napi
+      - run: npm run build
+        working-directory: crates/svgm-napi
+      - run: npm test
+        working-directory: crates/svgm-napi

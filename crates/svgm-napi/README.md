@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  SVG optimization for the browser — WebAssembly build of <a href="https://github.com/madebyfrmwrk/svgm">svgm</a>.
+  SVG optimization for Node.js — native addon powered by <a href="https://github.com/madebyfrmwrk/svgm">svgm</a>.
 </p>
 
 <div align="center">
@@ -25,23 +25,37 @@
 
 ---
 
+33x faster than SVGO with better compression. Native Rust performance via [napi-rs](https://napi.rs), no WASM overhead.
+
 ## Install
 
 ```bash
-npm install svgm-wasm
+npm install svgm-node
 ```
+
+Prebuilt binaries are available for:
+
+| Platform | Architecture |
+|:--|:--|
+| Linux | x64 (glibc), x64 (musl) |
+| macOS | x64, arm64 (Apple Silicon) |
+| Windows | x64 |
 
 ## Usage
 
 ```js
-import init, { optimize, version } from 'svgm-wasm';
-
-await init();
+const { optimize, version } = require('svgm-node');
 
 const result = optimize('<svg xmlns="http://www.w3.org/2000/svg">...</svg>');
 console.log(result.data);       // optimized SVG string
 console.log(result.iterations); // convergence count
 console.log(version());         // e.g. "0.3.2"
+```
+
+### ESM
+
+```js
+import { optimize, version } from 'svgm-node';
 ```
 
 ### With options
@@ -57,6 +71,31 @@ const result = optimize(svgString, {
 });
 ```
 
+## API
+
+### `optimize(svg: string, options?: OptimizeOptions): OptimizeResult`
+
+Optimizes an SVG string. Throws on invalid SVG input.
+
+### `version(): string`
+
+Returns the svgm version.
+
+### Types
+
+```typescript
+interface OptimizeOptions {
+  preset?: string;                    // "safe" | "default"
+  precision?: number;                 // numeric precision (default: 3)
+  passes?: Record<string, boolean>;   // per-pass enable/disable
+}
+
+interface OptimizeResult {
+  data: string;       // optimized SVG
+  iterations: number; // convergence iterations
+}
+```
+
 ## Presets
 
 - **safe** — removal and normalization only (20 passes)
@@ -68,14 +107,14 @@ const result = optimize(svgString, {
 - [Playground](https://svgm.dev/playground)
 - [GitHub](https://github.com/madebyfrmwrk/svgm)
 - [CLI on crates.io](https://crates.io/crates/svgm)
-- [Node.js bindings](https://www.npmjs.com/package/svgm-node)
+- [WASM build](https://www.npmjs.com/package/svgm-wasm)
 
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
 
-[npm-badge]: https://img.shields.io/npm/v/svgm-wasm.svg
-[npm-url]: https://www.npmjs.com/package/svgm-wasm
+[npm-badge]: https://img.shields.io/npm/v/svgm-node.svg
+[npm-url]: https://www.npmjs.com/package/svgm-node
 [license-badge]: https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg
 [license-url]: https://github.com/madebyfrmwrk/svgm/blob/main/LICENSE-MIT
 [ci-badge]: https://github.com/madebyfrmwrk/svgm/actions/workflows/ci.yml/badge.svg

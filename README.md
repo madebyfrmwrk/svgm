@@ -228,7 +228,9 @@ let result = optimize_with_config("<svg>...</svg>", &config).unwrap();
 svgm/
 ├── crates/
 │   ├── svgm-core/       # Parser, AST, optimizer, serializer, passes
-│   └── svgm-cli/        # CLI binary (clap + indicatif)
+│   ├── svgm-cli/        # CLI binary (clap + indicatif)
+│   ├── svgm-wasm/       # WebAssembly build (npm: svgm-wasm)
+│   └── svgm-napi/       # Node.js native addon (npm: svgm-node)
 ├── LICENSE-MIT
 └── LICENSE-APACHE
 ```
@@ -244,7 +246,7 @@ svgm/
 - [x] Safety presets and config file support
 - [x] WASM build for browser usage
 - [x] SVGO feature parity (34 passes, compression at par)
-- [ ] Node.js bindings via napi-rs
+- [x] Node.js bindings via napi-rs
 
 ## Contributing
 

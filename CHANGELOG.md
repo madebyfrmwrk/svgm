@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+### Added
+
+- **Node.js native bindings** via napi-rs, published as `svgm-node` on npm (`npm install svgm-node`). Prebuilt binaries for Linux (x64 glibc/musl), macOS (x64/arm64), and Windows (x64). Same API surface as `svgm-wasm` — `optimize(svg, options?)` and `version()`.
+- CI now builds and tests the napi crate alongside WASM.
+- Release workflow publishes `svgm-node` to npm with provenance on version tags.
+
 ## 0.3.1
 
 ### Changed

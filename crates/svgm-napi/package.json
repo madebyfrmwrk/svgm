@@ -1,0 +1,36 @@
+{
+  "name": "svgm-node",
+  "version": "0.3.2",
+  "description": "svgm SVG optimizer — Node.js native addon",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madebyfrmwrk/svgm"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "svgm-napi",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ],
+  "devDependencies": {
+    "@napi-rs/cli": "^3.6.1",
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "build": "napi build --release --platform",
+    "test": "vitest run"
+  }
+}
