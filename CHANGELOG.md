@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+### Changed
+
+- **WASM package renamed** from `@frmwrksoftware/wasm` to `svgm-wasm` (`npm install svgm-wasm`).
+- npm publishes now include provenance attestation.
+
 ## 0.3.0
 
 ### Added

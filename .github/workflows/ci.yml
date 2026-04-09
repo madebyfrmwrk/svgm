@@ -41,6 +41,6 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - run: wasm-pack build crates/svgm-wasm --target web
       - name: Set npm package name
-        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='@frmwrksoftware/wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
+        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('pkg/package.json'));p.name='svgm-wasm';fs.writeFileSync('pkg/package.json',JSON.stringify(p,null,2)+'\n')"
         working-directory: crates/svgm-wasm
       - run: wasm-pack test --headless --chrome crates/svgm-wasm

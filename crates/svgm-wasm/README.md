@@ -1,24 +1,23 @@
-# @frmwrksoftware/wasm
+# svgm-wasm
 
-WebAssembly build of [svgm](https://github.com/madebyfrmwrk/svgm), a fast SVG optimizer written in Rust.
+WebAssembly build of [svgm](https://github.com/madebyfrmwrk/svgm) — a fast SVG optimizer written in Rust. 33x faster than SVGO with better compression.
 
 ## Install
 
 ```bash
-npm install @frmwrksoftware/wasm
+npm install svgm-wasm
 ```
 
 ## Usage
 
 ```js
-import init, { optimize, version } from '@frmwrksoftware/wasm';
+import init, { optimize, version } from 'svgm-wasm';
 
 await init();
 
 const result = optimize('<svg xmlns="http://www.w3.org/2000/svg">...</svg>');
 console.log(result); // optimized SVG string
-
-console.log(version()); // e.g. "0.2.2"
+console.log(version()); // e.g. "0.3.1"
 ```
 
 ### With options
@@ -36,11 +35,12 @@ const result = optimize(svgString, {
 
 ## Presets
 
-- **safe** — removal and normalization only
-- **default** — full optimization (all passes enabled)
+- **safe** — removal and normalization only (17 passes)
+- **default** — full optimization (34 passes)
 
 ## Links
 
-- [GitHub](https://github.com/madebyfrmwrk/svgm)
+- [Website](https://svgm.dev)
 - [Playground](https://svgm.dev/playground)
+- [GitHub](https://github.com/madebyfrmwrk/svgm)
 - [CLI on crates.io](https://crates.io/crates/svgm)
