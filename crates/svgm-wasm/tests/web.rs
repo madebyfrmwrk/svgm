@@ -26,7 +26,7 @@ fn optimize_with_preset() {
 
 #[wasm_bindgen_test]
 fn optimize_with_pass_override() {
-    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>test</desc><rect width="10" height="10"/></svg>"#;
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>Created with Figma</desc><rect width="10" height="10"/></svg>"#;
     let passes = js_sys::Object::new();
     js_sys::Reflect::set(&passes, &"removeDesc".into(), &JsValue::TRUE).unwrap();
     let opts = js_sys::Object::new();
