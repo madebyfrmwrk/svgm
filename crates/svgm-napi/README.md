@@ -26,8 +26,17 @@
 ## Install
 
 ```bash
-npm install svgm-node        # as a project dependency
-npm install -g svgm-node     # global install for CLI usage
+# npm
+npm install -g svgm-node
+
+# yarn
+yarn global add svgm-node
+
+# pnpm
+pnpm add -g svgm-node
+
+# bun
+bun add -g svgm-node
 ```
 
 Prebuilt binaries are available for:
