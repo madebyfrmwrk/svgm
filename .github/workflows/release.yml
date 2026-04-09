@@ -135,7 +135,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: napi-*
-          path: crates/svgm-napi/artifacts
+          path: crates/svgm-napi
           merge-multiple: true
       - run: npm install
         working-directory: crates/svgm-napi
