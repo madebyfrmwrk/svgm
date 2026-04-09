@@ -139,7 +139,7 @@ jobs:
           merge-multiple: true
       - run: npm install
         working-directory: crates/svgm-napi
-      - run: npx napi prepublish --skip-gh-release
+      - run: npx napi pre-publish --no-gh-release
         working-directory: crates/svgm-napi
       - run: npm publish --access public --provenance
         working-directory: crates/svgm-napi
