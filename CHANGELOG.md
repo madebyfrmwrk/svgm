@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4
+
+### Fixed
+
+- Fixed npm publish: `index.js` and `index.d.ts` (generated JS loader and types) are now committed to the repo so they're included in the published package.
+- Fixed release workflow artifact download path for napi platform binaries.
+- Fixed CLI bin script to use `createRequire` for CJS/ESM compatibility.
+
 ## 0.3.3
 
 ### Added

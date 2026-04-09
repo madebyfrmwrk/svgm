@@ -1,6 +1,6 @@
 {
   "name": "svgm-node",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "svgm SVG optimizer — Node.js native addon",
   "license": "MIT OR Apache-2.0",
   "repository": {
