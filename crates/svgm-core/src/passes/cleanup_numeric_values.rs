@@ -94,8 +94,16 @@ fn cleanup_numeric(value: &str, precision: u32) -> Option<String> {
     // Strip `px` suffix (default SVG unit)
     let (num_str, _unit) = if let Some(s) = trimmed.strip_suffix("px") {
         (s, "")
-    } else if trimmed.ends_with('%')
-        || trimmed.ends_with("em")
+    } else if let Some(s) = trimmed.strip_suffix('%') {
+        // Handle percentage values: round and preserve %
+        let num: f64 = s.parse().ok()?;
+        let rounded = round_to(num, precision);
+        let result = format!("{}%", format_number(rounded));
+        if result.len() < trimmed.len() {
+            return Some(result);
+        }
+        return None;
+    } else if trimmed.ends_with("em")
         || trimmed.ends_with("ex")
         || trimmed.ends_with("pt")
         || trimmed.ends_with("pc")
@@ -131,7 +139,19 @@ fn cleanup_viewbox(value: &str, precision: u32) -> Option<String> {
 
 fn round_to(value: f64, precision: u32) -> f64 {
     let factor = 10f64.powi(precision as i32);
-    (value * factor).round() / factor
+    let rounded = (value * factor).round() / factor;
+
+    // "strongRound": try precision-1 and use it if error is acceptable
+    if precision > 0 {
+        let error = 10f64.powi(-(precision as i32));
+        let factor_low = 10f64.powi((precision - 1) as i32);
+        let rounded_low = (value * factor_low).round() / factor_low;
+        if (rounded - rounded_low).abs() < error {
+            return rounded_low;
+        }
+    }
+
+    rounded
 }
 
 /// Format a number, stripping trailing zeros and unnecessary decimal points.

@@ -24,6 +24,39 @@ impl Pass for ConvertTransform {
         for id in ids {
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind {
+                // Process transform, gradientTransform, and patternTransform
+                for attr_name in &["transform", "gradientTransform", "patternTransform"] {
+                    let Some(pos) = elem
+                        .attributes
+                        .iter()
+                        .position(|a| a.name == *attr_name && a.prefix.is_none())
+                    else {
+                        continue;
+                    };
+
+                    let transform_str = &elem.attributes[pos].value;
+                    let Some(matrix) = parse_and_merge_transforms(transform_str) else {
+                        continue;
+                    };
+
+                    if matrix.is_identity(self.precision) {
+                        elem.attributes.remove(pos);
+                        changed = true;
+                        continue;
+                    }
+
+                    // For gradient/pattern transforms, only simplify the string
+                    if *attr_name != "transform" {
+                        let simplified = matrix.serialize(self.precision);
+                        if simplified.len() < elem.attributes[pos].value.len() {
+                            elem.attributes[pos].value = simplified;
+                            changed = true;
+                        }
+                        continue;
+                    }
+                }
+
+                // The rest of transform-specific logic (translate application, etc.)
                 let transform_pos = elem
                     .attributes
                     .iter()
@@ -36,7 +69,6 @@ impl Pass for ConvertTransform {
                 };
 
                 if matrix.is_identity(self.precision) {
-                    // Identity transform — remove the attribute entirely
                     elem.attributes.remove(pos);
                     changed = true;
                     continue;
@@ -61,14 +93,24 @@ impl Pass for ConvertTransform {
                             && let Some(new_d) =
                                 apply_translate_to_path(&d_val, tx, ty, self.precision)
                         {
-                            elem.attributes
-                                .iter_mut()
-                                .find(|a| a.name == "d" && a.prefix.is_none())
-                                .unwrap()
-                                .value = new_d;
-                            elem.attributes.remove(pos);
-                            changed = true;
-                            continue;
+                            // Compare: applied d (no transform) vs original d + translate attr
+                            // Full attr overhead: ` transform="translate(tx,ty)"`
+                            let tx_s = fmt(tx, self.precision);
+                            let ty_s = fmt(ty, self.precision);
+                            let transform_attr_overhead =
+                                " transform=\"translate(,)\"".len() + tx_s.len() + ty_s.len();
+                            if new_d.len() <= d_val.len() + transform_attr_overhead {
+                                // Applying translate produces shorter or equal output
+                                elem.attributes
+                                    .iter_mut()
+                                    .find(|a| a.name == "d" && a.prefix.is_none())
+                                    .unwrap()
+                                    .value = new_d;
+                                elem.attributes.remove(pos);
+                                changed = true;
+                                continue;
+                            }
+                            // Keeping translate is shorter — don't apply
                         }
                     }
                 }
@@ -398,8 +440,8 @@ impl Matrix {
             }
             return format!("scale({},{})", fmt(sx, precision), fmt(sy, precision));
         }
-        // Fall back to matrix
-        format!(
+
+        let matrix_str = format!(
             "matrix({},{},{},{},{},{})",
             fmt(self.a, precision),
             fmt(self.b, precision),
@@ -407,7 +449,60 @@ impl Matrix {
             fmt(self.d, precision),
             fmt(self.e, precision),
             fmt(self.f, precision),
-        )
+        );
+
+        // Try translate+scale: b=0, c=0 (diagonal matrix with translation)
+        if approx_eq(self.b, 0.0, precision) && approx_eq(self.c, 0.0, precision) {
+            let t_part = if approx_eq(self.e, 0.0, precision) && approx_eq(self.f, 0.0, precision) {
+                String::new()
+            } else if approx_eq(self.f, 0.0, precision) {
+                format!("translate({})", fmt(self.e, precision))
+            } else {
+                format!(
+                    "translate({} {})",
+                    fmt(self.e, precision),
+                    fmt(self.f, precision)
+                )
+            };
+            let s_part = if approx_eq(self.a, self.d, precision) {
+                format!("scale({})", fmt(self.a, precision))
+            } else {
+                format!(
+                    "scale({} {})",
+                    fmt(self.a, precision),
+                    fmt(self.d, precision)
+                )
+            };
+            let composed = if t_part.is_empty() {
+                s_part
+            } else {
+                format!("{t_part}{s_part}")
+            };
+            if composed.len() < matrix_str.len() {
+                return composed;
+            }
+        }
+
+        // Try rotate+scale: a=d, b=-c (rotation matrix, possibly with scale)
+        if approx_eq(self.a, self.d, precision)
+            && approx_eq(self.b, -self.c, precision)
+            && approx_eq(self.e, 0.0, precision)
+            && approx_eq(self.f, 0.0, precision)
+        {
+            let scale = (self.a * self.a + self.b * self.b).sqrt();
+            let angle = self.b.atan2(self.a).to_degrees();
+            let r_part = format!("rotate({})", fmt(angle, precision));
+            let composed = if approx_eq(scale, 1.0, precision) {
+                r_part
+            } else {
+                format!("{}scale({})", r_part, fmt(scale, precision))
+            };
+            if composed.len() < matrix_str.len() {
+                return composed;
+            }
+        }
+
+        matrix_str
     }
 }
 
@@ -430,6 +525,10 @@ fn fmt(val: f64, precision: u32) -> String {
 
 /// Parse a transform attribute string and merge all transforms into a single matrix.
 fn parse_and_merge_transforms(s: &str) -> Option<Matrix> {
+    // Normalize European decimal commas: "0,7282" → "0.7282"
+    // A comma between digits (with no space before it) is a decimal separator.
+    // A comma followed by a space or preceded by a space is an argument separator.
+    let s = normalize_european_decimals(s);
     let mut result = Matrix::identity();
     let mut chars = s.chars().peekable();
 
@@ -588,6 +687,51 @@ fn apply_offset(elem: &mut crate::ast::Element, attr_name: &str, offset: f64, pr
             value: fmt(offset, precision),
         });
     }
+}
+
+/// Normalize European decimal commas in transform strings.
+/// "translate(0,7282, 0,9693)" → "translate(0.7282, 0.9693)"
+/// Detection: if the string contains no dots and has "digit,digit" patterns,
+/// it uses European decimal commas. In that case, commas between digits (no surrounding
+/// space) are decimal separators; commas followed by space are argument separators.
+fn normalize_european_decimals(s: &str) -> String {
+    // Only apply if the string uses European format: no dots, has digit,digit patterns,
+    // AND uses ", " (comma-space) as argument separators.
+    // Normal SVG: "translate(10,20)" — single comma = arg separator
+    // European:   "translate(0,7282, 0,9693)" — comma-space = arg, comma-no-space = decimal
+    let has_dots = s.contains('.');
+    if has_dots {
+        return s.to_string();
+    }
+    let has_comma_space = s.contains(", ");
+    if !has_comma_space {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let has_european = bytes
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b',' && w[2].is_ascii_digit());
+    if !has_european {
+        return s.to_string();
+    }
+
+    // Replace digit,digit commas with dots; keep comma+space as arg separators
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b','
+            && i > 0
+            && bytes[i - 1].is_ascii_digit()
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
+            result.push('.');
+        } else {
+            result.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    result
 }
 
 fn skip_ws(chars: &mut std::iter::Peekable<std::str::Chars>) {

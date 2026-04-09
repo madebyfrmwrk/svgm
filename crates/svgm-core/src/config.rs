@@ -2,16 +2,14 @@ use std::collections::HashMap;
 
 use crate::passes::{self, Pass};
 
-/// Optimization aggressiveness level.
+/// Optimization preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
     /// Zero-risk-to-rendering: removal, normalization, and whitespace passes only.
     Safe,
-    /// Structural and transform optimization (default). Matches the full pass set.
+    /// Full optimization (default). All passes enabled.
     #[default]
-    Balanced,
-    /// Maximum compression. Same passes as Balanced but with lower numeric precision (2).
-    Aggressive,
+    Default,
 }
 
 /// Configuration for the optimization pipeline.
@@ -20,7 +18,7 @@ pub struct Config {
     /// Which preset to use as the base pass set.
     pub preset: Preset,
     /// Numeric precision for rounding passes. If `None`, uses the preset default
-    /// (3 for Safe/Balanced, 2 for Aggressive).
+    /// (default: 3).
     pub precision: Option<u32>,
     /// Per-pass overrides. `true` enables a pass not in the preset, `false` disables one that is.
     pub pass_overrides: HashMap<String, bool>,
@@ -29,51 +27,52 @@ pub struct Config {
 impl Config {
     /// Returns the effective numeric precision for this configuration.
     pub fn effective_precision(&self) -> u32 {
-        if let Some(p) = self.precision {
-            return p;
-        }
-        match self.preset {
-            Preset::Aggressive => 2,
-            _ => 3,
-        }
+        self.precision.unwrap_or(3)
     }
 }
 
-// (name, in_safe, in_balanced, in_aggressive) — execution order matters.
-const PASS_CATALOG: &[(&str, bool, bool, bool)] = &[
-    ("removeDoctype", true, true, true),
-    ("removeProcInst", true, true, true),
-    ("removeComments", true, true, true),
-    ("removeMetadata", true, true, true),
-    ("removeEditorData", true, true, true),
-    ("removeEmptyAttrs", true, true, true),
-    ("removeEmptyText", true, true, true),
-    ("removeEmptyContainers", true, true, true),
-    ("removeHiddenElems", true, true, true),
-    ("removeUnusedNamespaces", true, true, true),
-    ("cleanupAttrs", true, true, true),
-    ("inlineStyles", false, true, true),
-    ("cleanupNumericValues", true, true, true),
-    ("convertColors", true, true, true),
-    ("removeUnknownsAndDefaults", true, true, true),
-    ("convertShapeToPath", false, true, true),
-    ("convertTransform", false, true, true),
-    ("collapseGroups", false, true, true),
-    ("cleanupIds", false, true, true),
-    ("convertPathData", false, true, true),
-    ("mergePaths", false, true, true),
-    ("sortAttrs", true, true, true),
-    ("minifyStyles", true, true, true),
-    ("minifyWhitespace", true, true, true),
-    // removeDesc is opt-in only — not part of any preset
-    ("removeDesc", false, false, false),
+// (name, in_safe, in_default) — execution order matters.
+const PASS_CATALOG: &[(&str, bool, bool)] = &[
+    ("removeDoctype", true, true),
+    ("removeProcInst", true, true),
+    ("removeComments", true, true),
+    ("removeDeprecatedAttrs", true, true),
+    ("removeMetadata", true, true),
+    ("removeEditorData", true, true),
+    ("removeDesc", false, true),
+    ("removeEmptyAttrs", true, true),
+    ("removeEmptyText", true, true),
+    ("removeHiddenElems", true, true),
+    ("removeUselessDefs", false, true),
+    ("removeUselessStrokeAndFill", false, true),
+    ("removeEmptyContainers", true, true),
+    ("removeUnusedNamespaces", true, true),
+    ("cleanupAttrs", true, true),
+    ("inlineStyles", false, true),
+    ("minifyStyles", true, true),
+    ("cleanupNumericValues", true, true),
+    ("convertColors", true, true),
+    ("removeUnknownsAndDefaults", true, true),
+    ("removeNonInheritableGroupAttrs", false, true),
+    ("cleanupEnableBackground", true, true),
+    ("convertEllipseToCircle", false, true),
+    ("convertShapeToPath", false, true),
+    ("moveElemsAttrsToGroup", false, true),
+    ("moveGroupAttrsToElems", false, true),
+    ("convertTransform", false, true),
+    ("collapseGroups", false, true),
+    ("cleanupIds", false, true),
+    ("convertPathData", false, true),
+    ("mergePaths", false, true),
+    ("sortAttrs", true, true),
+    ("sortDefsChildren", true, true),
+    ("minifyWhitespace", true, true),
 ];
 
-fn is_in_preset(entry: &(&str, bool, bool, bool), preset: Preset) -> bool {
+fn is_in_preset(entry: &(&str, bool, bool), preset: Preset) -> bool {
     match preset {
         Preset::Safe => entry.1,
-        Preset::Balanced => entry.2,
-        Preset::Aggressive => entry.3,
+        Preset::Default => entry.2,
     }
 }
 
@@ -82,17 +81,24 @@ fn create_pass(name: &str, precision: u32) -> Box<dyn Pass> {
         "removeDoctype" => Box::new(passes::remove_doctype::RemoveDoctype),
         "removeProcInst" => Box::new(passes::remove_proc_inst::RemoveProcInst),
         "removeComments" => Box::new(passes::remove_comments::RemoveComments),
+        "removeDeprecatedAttrs" => Box::new(passes::remove_deprecated_attrs::RemoveDeprecatedAttrs),
         "removeMetadata" => Box::new(passes::remove_metadata::RemoveMetadata),
         "removeEditorData" => Box::new(passes::remove_editor_data::RemoveEditorData),
+        "removeDesc" => Box::new(passes::remove_desc::RemoveDesc),
         "removeEmptyAttrs" => Box::new(passes::remove_empty_attrs::RemoveEmptyAttrs),
         "removeEmptyText" => Box::new(passes::remove_empty_text::RemoveEmptyText),
-        "removeEmptyContainers" => Box::new(passes::remove_empty_containers::RemoveEmptyContainers),
         "removeHiddenElems" => Box::new(passes::remove_hidden_elems::RemoveHiddenElems),
+        "removeUselessDefs" => Box::new(passes::remove_useless_defs::RemoveUselessDefs),
+        "removeUselessStrokeAndFill" => {
+            Box::new(passes::remove_useless_stroke_and_fill::RemoveUselessStrokeAndFill)
+        }
+        "removeEmptyContainers" => Box::new(passes::remove_empty_containers::RemoveEmptyContainers),
         "removeUnusedNamespaces" => {
             Box::new(passes::remove_unused_namespaces::RemoveUnusedNamespaces)
         }
         "cleanupAttrs" => Box::new(passes::cleanup_attrs::CleanupAttrs),
         "inlineStyles" => Box::new(passes::inline_styles::InlineStyles),
+        "minifyStyles" => Box::new(passes::minify_styles::MinifyStyles),
         "cleanupNumericValues" => {
             Box::new(passes::cleanup_numeric_values::CleanupNumericValues { precision })
         }
@@ -100,8 +106,23 @@ fn create_pass(name: &str, precision: u32) -> Box<dyn Pass> {
         "removeUnknownsAndDefaults" => {
             Box::new(passes::remove_unknowns_and_defaults::RemoveUnknownsAndDefaults)
         }
+        "removeNonInheritableGroupAttrs" => {
+            Box::new(passes::remove_non_inheritable_group_attrs::RemoveNonInheritableGroupAttrs)
+        }
+        "cleanupEnableBackground" => {
+            Box::new(passes::cleanup_enable_background::CleanupEnableBackground)
+        }
+        "convertEllipseToCircle" => {
+            Box::new(passes::convert_ellipse_to_circle::ConvertEllipseToCircle)
+        }
         "convertShapeToPath" => {
             Box::new(passes::convert_shape_to_path::ConvertShapeToPath { precision })
+        }
+        "moveElemsAttrsToGroup" => {
+            Box::new(passes::move_elems_attrs_to_group::MoveElemsAttrsToGroup)
+        }
+        "moveGroupAttrsToElems" => {
+            Box::new(passes::move_group_attrs_to_elems::MoveGroupAttrsToElems)
         }
         "convertTransform" => Box::new(passes::convert_transform::ConvertTransform { precision }),
         "collapseGroups" => Box::new(passes::collapse_groups::CollapseGroups),
@@ -109,9 +130,8 @@ fn create_pass(name: &str, precision: u32) -> Box<dyn Pass> {
         "convertPathData" => Box::new(passes::convert_path_data::ConvertPathData { precision }),
         "mergePaths" => Box::new(passes::merge_paths::MergePaths),
         "sortAttrs" => Box::new(passes::sort_attrs::SortAttrs),
-        "minifyStyles" => Box::new(passes::minify_styles::MinifyStyles),
+        "sortDefsChildren" => Box::new(passes::sort_defs_children::SortDefsChildren),
         "minifyWhitespace" => Box::new(passes::minify_whitespace::MinifyWhitespace),
-        "removeDesc" => Box::new(passes::remove_desc::RemoveDesc),
         _ => panic!("unknown pass: {name}"),
     }
 }
@@ -163,29 +183,32 @@ mod tests {
                 "removeDoctype",
                 "removeProcInst",
                 "removeComments",
+                "removeDeprecatedAttrs",
                 "removeMetadata",
                 "removeEditorData",
                 "removeEmptyAttrs",
                 "removeEmptyText",
-                "removeEmptyContainers",
                 "removeHiddenElems",
+                "removeEmptyContainers",
                 "removeUnusedNamespaces",
                 "cleanupAttrs",
+                "minifyStyles",
                 "cleanupNumericValues",
                 "convertColors",
                 "removeUnknownsAndDefaults",
+                "cleanupEnableBackground",
                 "sortAttrs",
-                "minifyStyles",
+                "sortDefsChildren",
                 "minifyWhitespace",
             ]
         );
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
     }
 
     #[test]
-    fn balanced_preset_passes() {
+    fn default_preset_passes() {
         let config = Config::default();
-        assert_eq!(config.preset, Preset::Balanced);
+        assert_eq!(config.preset, Preset::Default);
         let names = pass_names(&config);
         assert_eq!(
             names,
@@ -193,61 +216,45 @@ mod tests {
                 "removeDoctype",
                 "removeProcInst",
                 "removeComments",
+                "removeDeprecatedAttrs",
                 "removeMetadata",
                 "removeEditorData",
+                "removeDesc",
                 "removeEmptyAttrs",
                 "removeEmptyText",
-                "removeEmptyContainers",
                 "removeHiddenElems",
+                "removeUselessDefs",
+                "removeUselessStrokeAndFill",
+                "removeEmptyContainers",
                 "removeUnusedNamespaces",
                 "cleanupAttrs",
                 "inlineStyles",
+                "minifyStyles",
                 "cleanupNumericValues",
                 "convertColors",
                 "removeUnknownsAndDefaults",
+                "removeNonInheritableGroupAttrs",
+                "cleanupEnableBackground",
+                "convertEllipseToCircle",
                 "convertShapeToPath",
+                "moveElemsAttrsToGroup",
+                "moveGroupAttrsToElems",
                 "convertTransform",
                 "collapseGroups",
                 "cleanupIds",
                 "convertPathData",
                 "mergePaths",
                 "sortAttrs",
-                "minifyStyles",
+                "sortDefsChildren",
                 "minifyWhitespace",
             ]
         );
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 34);
     }
 
     #[test]
-    fn aggressive_preset_passes() {
-        let config = Config {
-            preset: Preset::Aggressive,
-            ..Config::default()
-        };
-        let names = pass_names(&config);
-        // Same passes as balanced
-        assert_eq!(names.len(), 24);
-        assert_eq!(names, pass_names(&Config::default()));
-    }
-
-    #[test]
-    fn remove_desc_not_in_any_preset() {
-        for preset in [Preset::Safe, Preset::Balanced, Preset::Aggressive] {
-            let config = Config {
-                preset,
-                ..Config::default()
-            };
-            let names = pass_names(&config);
-            assert!(
-                !names.contains(&"removeDesc"),
-                "removeDesc should not be in {preset:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn override_enables_opt_in_pass() {
+    fn override_enables_pass_not_in_preset() {
+        // removeDesc is in Default but not in Safe — enable it via override
         let config = Config {
             preset: Preset::Safe,
             pass_overrides: HashMap::from([("removeDesc".to_string(), true)]),
@@ -255,14 +262,12 @@ mod tests {
         };
         let names = pass_names(&config);
         assert!(names.contains(&"removeDesc"));
-        // Should be at the end (catalog order)
-        assert_eq!(names.last(), Some(&"removeDesc"));
     }
 
     #[test]
     fn override_disables_preset_pass() {
         let config = Config {
-            preset: Preset::Balanced,
+            preset: Preset::Default,
             pass_overrides: HashMap::from([("collapseGroups".to_string(), false)]),
             ..Config::default()
         };
@@ -281,63 +286,14 @@ mod tests {
             3
         );
         assert_eq!(Config::default().effective_precision(), 3);
-        assert_eq!(
-            Config {
-                preset: Preset::Aggressive,
-                ..Config::default()
-            }
-            .effective_precision(),
-            2
-        );
     }
 
     #[test]
-    fn explicit_precision_overrides_preset() {
+    fn explicit_precision_overrides_default() {
         let config = Config {
-            preset: Preset::Aggressive,
             precision: Some(4),
             ..Config::default()
         };
         assert_eq!(config.effective_precision(), 4);
-    }
-
-    #[test]
-    fn balanced_matches_old_default_passes() {
-        // Balanced with default config must produce the exact same pass list
-        // as the old hardcoded default_passes() — same names, same order.
-        let config = Config::default();
-        let new_names: Vec<&str> = passes_for_config(&config)
-            .iter()
-            .map(|p| p.name())
-            .collect();
-
-        let old_names: Vec<&str> = vec![
-            "removeDoctype",
-            "removeProcInst",
-            "removeComments",
-            "removeMetadata",
-            "removeEditorData",
-            "removeEmptyAttrs",
-            "removeEmptyText",
-            "removeEmptyContainers",
-            "removeHiddenElems",
-            "removeUnusedNamespaces",
-            "cleanupAttrs",
-            "inlineStyles",
-            "cleanupNumericValues",
-            "convertColors",
-            "removeUnknownsAndDefaults",
-            "convertShapeToPath",
-            "convertTransform",
-            "collapseGroups",
-            "cleanupIds",
-            "convertPathData",
-            "mergePaths",
-            "sortAttrs",
-            "minifyStyles",
-            "minifyWhitespace",
-        ];
-
-        assert_eq!(new_names, old_names);
     }
 }

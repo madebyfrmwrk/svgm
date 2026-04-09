@@ -87,10 +87,9 @@ When piped (e.g. `svgm icon.svg | gzip`), output goes to stdout automatically.
 ### Presets
 
 ```bash
-svgm icon.svg --preset safe         # Removal + normalization only (17 passes)
-svgm icon.svg --preset balanced     # Full pass set (24 passes, default)
-svgm icon.svg --preset aggressive   # Full pass set, lower precision
-svgm icon.svg --precision 2         # Override numeric precision on any preset
+svgm icon.svg --preset safe       # Removal + normalization only (20 passes)
+svgm icon.svg --preset default    # Full optimization (34 passes, default)
+svgm icon.svg --precision 2       # Override numeric precision on any preset
 ```
 
 ### Config file
@@ -98,11 +97,10 @@ svgm icon.svg --precision 2         # Override numeric precision on any preset
 Create an `svgm.config.toml` in your project root:
 
 ```toml
-preset = "balanced"
+preset = "default"
 precision = 3
 
 [passes]
-removeDesc = true          # opt-in: strip <desc> and <title>
 convertShapeToPath = false  # opt-out: disable a specific pass
 ```
 
@@ -114,14 +112,15 @@ SVGM auto-discovers the config by walking up from the input file's directory. Us
 
 | | **SVGM** | **SVGO** |
 |:--|:--|:--|
-| **Compression** | 14.9% | 18.2% |
-| **Median time** | 110ms | 291ms |
-| **Speed** | **2.6x faster** | baseline |
+| **Compression** | **18.5%** | 18.2% |
+| **Median time** | **347ms** | 11,595ms |
+| **Speed** | **33x faster** | baseline |
+| **Files won** | **55** | 44 |
 | **Invocations to converge** | **1** | 1-3 |
 
 Full benchmark details at [svgm.dev/docs/benchmarks](https://svgm.dev/docs/benchmarks).
 
-SVGM ships as a single native binary. The ~3 point compression gap is actively being closed.
+SVGM compresses more than SVGO while being 33x faster.
 
 ## How it works
 
@@ -143,38 +142,48 @@ Passes operate directly on the in-memory AST, avoiding repeated serialize/parse 
 ### Optimization passes
 
 **Removal** — strip dead weight
-- Comments, doctypes, XML processing instructions
-- Editor metadata (Inkscape, Illustrator, Sketch, Figma)
-- Empty containers, empty attributes, empty text elements
-- Unused namespace declarations
-- Attributes matching SVG spec defaults (`opacity="1"`, `stroke="none"`, etc.)
+- Comments, doctypes, XML processing instructions, deprecated attributes
+- Editor metadata (Inkscape, Illustrator, Sketch, Figma) and editor-generated descriptions
+- Empty containers, empty attributes, empty text elements, useless defs
+- Unused namespace declarations, non-inheritable group attributes
+- Attributes matching SVG spec defaults (`opacity="1"`, `stroke="none"`, `version="1.1"`, etc.)
+- Useless stroke/fill sub-properties when the primary is invisible
 
 **Normalization** — tighten values
-- Collapse whitespace in attributes
-- Round numeric values, strip trailing zeros and default `px` units
-- Shorten colors: `rgb(255,0,0)` -> `red`, `#aabbcc` -> `#abc`
+- Collapse whitespace in attributes, minify inline styles
+- Round numeric values with smart precision (tries lower precision when error is acceptable)
+- Shorten colors: `rgb(255,0,0)` -> `red`, `#aabbcc` -> `#abc` (including in `style=""`)
+- Promote common child attributes to parent group
+- Sort `<defs>` children for better compression
+- Clean up deprecated `enable-background`
 
 **Structural** — simplify the tree
-- Collapse useless `<g>` wrappers (no-attribute groups, single-child groups)
+- Collapse useless `<g>` wrappers (no-attribute groups, single-child groups with transform merging)
+- Distribute group transforms to children when safe
 - Reference safety: groups with `clip-path`, `mask`, or `filter` are never collapsed
 
 **Transform** — simplify and apply transforms
 - Merge consecutive transforms into a single equivalent (`translate(10,20) translate(5,5)` -> `translate(15,25)`)
+- Decompose matrices to shorter forms (`matrix(a,0,0,a,tx,ty)` -> `translate(tx,ty)scale(a)`)
 - Remove identity transforms (`scale(1)`, `translate(0,0)`, `rotate(0)`)
-- Apply pure translates directly to element coordinates and path data
+- Apply pure translates directly to element coordinates and path data (with length comparison)
 - Push transforms from single-child groups to child, enabling group collapse
+- Optimize `gradientTransform` and `patternTransform`
 
 **Geometry** — compress path data
 - Shape-to-path conversion (rect, circle, ellipse, line, polyline, polygon → shorter `<path>`)
+- Ellipse-to-circle conversion when rx equals ry
 - Path merging (adjacent non-overlapping paths with identical attributes, with geometric intersection safety)
-- Absolute-to-relative coordinate conversion where shorter
-- `L` to `H`/`V` shortcut commands
-- `C` to `S` and `Q` to `T` shorthand curves (reflected control points)
+- Cubic-to-quadratic Bezier conversion (C → Q when losslessly possible)
+- Cubic-to-arc conversion (detects circular arc curves)
+- Smart arc radius rounding (sagitta-based geometric validation)
+- Absolute-to-relative coordinate conversion where shorter (precision-aware comparison)
+- `L` to `H`/`V` shortcut commands, consecutive h/v merging
+- `C` to `S` and `Q` to `T` shorthand curves (reflected control points, including after non-curve commands)
 - Degenerate curve to line simplification (collinear control points)
-- Redundant command removal (zero-length lines)
-- Strip leading zeros (`.5` instead of `0.5`)
-- Implicit command repetition
-- Minimal separator insertion
+- Redundant command removal (zero-length lines, lineto before closepath)
+- Strip leading zeros (`.5` instead of `0.5`), no space after command letters
+- Implicit command repetition, minimal separator insertion
 
 **IDs** — clean up references
 - Remove unused `id` attributes
@@ -234,6 +243,7 @@ svgm/
 - [x] Recursive directory processing (`-r`)
 - [x] Safety presets and config file support
 - [x] WASM build for browser usage
+- [x] SVGO feature parity (34 passes, compression at par)
 - [ ] Node.js bindings via napi-rs
 
 ## Contributing

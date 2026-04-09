@@ -52,11 +52,10 @@ pub fn load_config(path: &Path) -> Result<Config, Box<dyn Error>> {
 
     let preset = match raw.preset.as_deref() {
         Some("safe") => Preset::Safe,
-        Some("balanced") => Preset::Balanced,
-        Some("aggressive") => Preset::Aggressive,
+        Some("default") | Some("balanced") | Some("aggressive") => Preset::Default,
         Some(other) => {
             return Err(Box::new(ConfigError(format!(
-                "unknown preset \"{other}\" — expected safe, balanced, or aggressive"
+                "unknown preset \"{other}\" — expected safe or default"
             ))));
         }
         None => Preset::default(),
@@ -112,7 +111,7 @@ removeComments = false
         fs::write(&path, "").unwrap();
 
         let config = load_config(&path).unwrap();
-        assert_eq!(config.preset, Preset::Balanced);
+        assert_eq!(config.preset, Preset::Default);
         assert_eq!(config.precision, None);
         assert!(config.pass_overrides.is_empty());
     }

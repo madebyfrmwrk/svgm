@@ -16,10 +16,19 @@ impl Pass for CleanupAttrs {
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind {
                 for attr in &mut elem.attributes {
-                    let cleaned = cleanup_whitespace(&attr.value);
-                    if cleaned != attr.value {
-                        attr.value = cleaned;
-                        changed = true;
+                    // Minify inline style attributes
+                    if attr.name == "style" && attr.prefix.is_none() {
+                        let minified = minify_inline_style(&attr.value);
+                        if minified != attr.value {
+                            attr.value = minified;
+                            changed = true;
+                        }
+                    } else {
+                        let cleaned = cleanup_whitespace(&attr.value);
+                        if cleaned != attr.value {
+                            attr.value = cleaned;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -31,6 +40,31 @@ impl Pass for CleanupAttrs {
             PassResult::Unchanged
         }
     }
+}
+
+/// Minify an inline style attribute: strip spaces around colons/semicolons,
+/// remove trailing semicolons.
+fn minify_inline_style(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for (i, part) in s.split(';').enumerate() {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if i > 0 && !result.is_empty() {
+            result.push(';');
+        }
+        if let Some(colon) = trimmed.find(':') {
+            let prop = trimmed[..colon].trim();
+            let val = trimmed[colon + 1..].trim();
+            result.push_str(prop);
+            result.push(':');
+            result.push_str(val);
+        } else {
+            result.push_str(trimmed);
+        }
+    }
+    result
 }
 
 /// Collapse runs of whitespace (spaces, tabs, newlines) into a single space,

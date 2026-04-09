@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- **9 new optimization passes** matching SVGO's default plugin set (25 → 34 passes):
+  - `removeDeprecatedAttrs` — strips deprecated SVG attributes (`xml:space`, `requiredFeatures`, etc.)
+  - `removeUselessDefs` — removes unreferenced elements inside `<defs>`
+  - `removeNonInheritableGroupAttrs` — strips non-inheritable presentation attributes from `<g>` elements
+  - `removeUselessStrokeAndFill` — removes stroke/fill sub-properties when the primary is invisible
+  - `convertEllipseToCircle` — converts `<ellipse>` to `<circle>` when rx equals ry
+  - `cleanupEnableBackground` — removes deprecated `enable-background` attribute and style property
+  - `moveElemsAttrsToGroup` — promotes common child attributes to parent group
+  - `moveGroupAttrsToElems` — distributes group transforms to children when safe
+  - `sortDefsChildren` — sorts `<defs>` children for better gzip compression
+- **Cubic-to-quadratic Bezier conversion** — losslessly converts C commands to shorter Q commands
+- **Cubic-to-arc conversion** — detects circular arc cubics and converts to SVG arc commands
+- **Smart arc radius rounding** — uses sagitta comparison to aggressively round arc radii without visual distortion
+- **Consecutive h/v merging** — combines adjacent horizontal/vertical line commands
+- **Redundant lineto-before-closepath removal** — strips final line segment when closepath returns to same point
+- **S/s shorthand detection after non-curve commands** — detects additional smooth cubic shorthand opportunities
+- **Colors in `style=""` attributes** — shortens hex colors inside inline style declarations
+- **Hex color lowercasing** — normalizes `#C3002F` to `#c3002f`
+- **Inline style minification** — strips spaces around colons/semicolons in `style` attributes
+- **Percentage precision truncation** — rounds percentage values in gradient attributes
+- **European decimal comma normalization** — handles `translate(0,7282, 0,9693)` from non-English exports
+- **Transform decomposition** — decomposes `matrix(a,0,0,a,tx,ty)` to shorter `translate()scale()` form
+- **gradientTransform/patternTransform** optimization — simplifies gradient and pattern transforms
+- **Additional default attributes** — removes `version="1.1"`, `mode="normal"`, `stop-color="#000"`, `x="0"`/`y="0"` on `<svg>`, and other SVG spec defaults
+
+### Changed
+
+- **Presets simplified**: `Balanced` and `Aggressive` replaced with `Default`. Two presets: `safe` and `default`. `balanced` and `aggressive` accepted as backward-compatible aliases.
+- **`removeDesc` moved to Default preset** — now only removes editor-generated descriptions ("Created with...", "Generator:..."), preserves custom descriptions for accessibility.
+- **Default precision** is always 3 (no more Aggressive=2 special case).
+- **collapseGroups** now merges transforms during single-child group collapse (composes group + child transforms).
+- **convertTransform** compares translate-applied vs translate-kept length, keeping the shorter form.
+- **StrongRound** — path data and numeric attributes try precision-1 when error is acceptable.
+- **Precision-aware abs/rel selection** — all path command comparisons use rounded lengths for accuracy.
+
+### Benchmark
+
+100 real-world SVG logos, 902.7 KiB total:
+- **svgm 0.3.0**: 18.5% compression, 347ms median, **33x faster** than SVGO
+- **SVGO 4.0.1**: 18.2% compression, 11,595ms median
+- svgm wins 55 of 100 files, SVGO wins 44, 1 tie
+
 ## 0.2.2
 
 ### Fixed

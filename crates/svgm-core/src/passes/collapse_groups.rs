@@ -48,17 +48,11 @@ impl Pass for CollapseGroups {
                 if children.len() == 1 {
                     let child_id = children[0];
                     if let NodeKind::Element(ref child_elem) = doc.node(child_id).kind {
-                        // Only merge if child is also an element (not text/comment)
-                        // and the group has no transform (transform merging is complex)
-                        let g_has_transform = elem.attributes.iter().any(|a| a.name == "transform");
                         let g_has_group_only = elem
                             .attributes
                             .iter()
                             .any(|a| GROUP_ONLY_ATTRS.contains(&a.name.as_str()));
-                        if !g_has_transform
-                            && !g_has_group_only
-                            && can_merge_attrs(elem, child_elem)
-                        {
+                        if !g_has_group_only && can_merge_attrs_with_transform(elem, child_elem) {
                             merge_group_into_child(doc, id, child_id);
                             changed = true;
                             continue;
@@ -96,11 +90,17 @@ fn hoist_children(doc: &mut Document, group_id: NodeId, parent_id: NodeId) {
 }
 
 /// Check if group attributes can be safely merged into the child element.
-/// Returns false if there are attribute name conflicts.
-fn can_merge_attrs(group: &crate::ast::Element, child: &crate::ast::Element) -> bool {
+/// Handles transform specially — allows composing group + child transforms.
+fn can_merge_attrs_with_transform(
+    group: &crate::ast::Element,
+    child: &crate::ast::Element,
+) -> bool {
     for g_attr in &group.attributes {
-        // If the child already has this attribute, don't merge (child value wins, but
-        // we'd lose the group's value silently — skip to be safe).
+        // Transform can be composed (prepend group's to child's)
+        if g_attr.name == "transform" && g_attr.prefix.is_none() {
+            continue;
+        }
+        // If the child already has this attribute, don't merge
         if child
             .attributes
             .iter()
@@ -121,10 +121,23 @@ fn merge_group_into_child(doc: &mut Document, group_id: NodeId, child_id: NodeId
         return;
     };
 
-    // Add group attrs to child
+    // Add group attrs to child, composing transforms
     if let NodeKind::Element(ref mut child_elem) = doc.node_mut(child_id).kind {
         for attr in group_attrs {
-            child_elem.attributes.push(attr);
+            if attr.name == "transform" && attr.prefix.is_none() {
+                // Compose: prepend group transform to child transform
+                if let Some(child_tf) = child_elem
+                    .attributes
+                    .iter_mut()
+                    .find(|a| a.name == "transform" && a.prefix.is_none())
+                {
+                    child_tf.value = format!("{} {}", attr.value, child_tf.value);
+                } else {
+                    child_elem.attributes.push(attr);
+                }
+            } else {
+                child_elem.attributes.push(attr);
+            }
         }
     }
 
@@ -174,11 +187,35 @@ mod tests {
     }
 
     #[test]
-    fn keeps_group_with_transform() {
+    fn collapses_group_with_transform_to_child() {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,10)"><rect/></g></svg>"#;
         let mut doc = parse(input).unwrap();
-        // Has transform — don't try to merge (transform merging is complex)
-        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(
+            !output.contains("<g"),
+            "group should be collapsed: {output}"
+        );
+        assert!(
+            output.contains("transform=\"translate(10,10)\""),
+            "transform should be on rect: {output}"
+        );
+    }
+
+    #[test]
+    fn composes_transforms_during_collapse() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,10)"><rect transform="scale(2)"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(
+            !output.contains("<g"),
+            "group should be collapsed: {output}"
+        );
+        assert!(
+            output.contains("translate(10,10) scale(2)"),
+            "transforms should be composed: {output}"
+        );
     }
 
     #[test]

@@ -52,6 +52,26 @@ const DEFAULT_ATTRS: &[(&str, &str)] = &[
     ("color-profile", "auto"),
     ("cursor", "auto"),
     ("enable-background", "accumulate"),
+    ("stop-color", "black"),
+    ("stop-color", "#000"),
+    ("stop-color", "#000000"),
+    ("stop-opacity", "1"),
+    // SVG filter defaults
+    ("mode", "normal"),
+    ("color-interpolation-filters", "linearRGB"),
+    ("flood-color", "black"),
+    ("flood-color", "#000"),
+    ("flood-color", "#000000"),
+    // Gradient defaults
+    ("spreadMethod", "pad"),
+    ("gradientUnits", "objectBoundingBox"),
+    // Misc defaults
+    ("clip-path", "none"),
+    ("mask", "none"),
+    ("unicode-bidi", "normal"),
+    ("baseline-shift", "baseline"),
+    ("white-space", "normal"),
+    ("text-overflow", "clip"),
 ];
 
 /// Elements where `fill="black"` is NOT the default and should not be removed.
@@ -80,6 +100,19 @@ impl Pass for RemoveUnknownsAndDefaults {
                     // Only check unprefixed attributes
                     if attr.prefix.is_some() {
                         return true;
+                    }
+
+                    // Remove obsolete version attribute from <svg> (SVG2)
+                    if attr.name == "version" && elem_name == "svg" {
+                        return false;
+                    }
+
+                    // Remove x="0" and y="0" from <svg> (spec defaults)
+                    if (attr.name == "x" || attr.name == "y")
+                        && attr.value == "0"
+                        && elem_name == "svg"
+                    {
+                        return false;
                     }
 
                     // Check fill removal exceptions
@@ -171,6 +204,15 @@ mod tests {
             RemoveUnknownsAndDefaults.run(&mut doc),
             PassResult::Unchanged
         );
+    }
+
+    #[test]
+    fn removes_version_from_svg() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg" version="1.1"><rect/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(!output.contains("version"));
     }
 
     #[test]

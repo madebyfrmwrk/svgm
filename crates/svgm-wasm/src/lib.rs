@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(typescript_custom_section)]
 const TS_TYPES: &str = r#"
 export interface OptimizeOptions {
-    preset?: "safe" | "balanced" | "aggressive";
+    preset?: "safe" | "default" | "balanced" | "aggressive";
     precision?: number;
     passes?: Record<string, boolean>;
 }
@@ -43,8 +43,9 @@ pub fn optimize(svg: &str, options: JsValue) -> Result<JsValue, JsError> {
 
     let preset = match opts.preset.as_deref() {
         Some("safe") => svgm_core::Preset::Safe,
-        Some("balanced") | None => svgm_core::Preset::Balanced,
-        Some("aggressive") => svgm_core::Preset::Aggressive,
+        Some("default") | Some("balanced") | Some("aggressive") | None => {
+            svgm_core::Preset::Default
+        }
         Some(other) => return Err(JsError::new(&format!("unknown preset: {other}"))),
     };
 

@@ -36,6 +36,13 @@ impl Pass for ConvertColors {
                         attr.value = shorter;
                         changed = true;
                     }
+                    // Also process colors inside style="" attributes
+                    if attr.name == "style"
+                        && let Some(new_style) = shorten_colors_in_style(&attr.value)
+                    {
+                        attr.value = new_style;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -80,11 +87,42 @@ pub(crate) fn shorten_color(value: &str) -> Option<String> {
         best = name.to_string();
     }
 
-    if best.len() < trimmed.len() || best != trimmed.to_lowercase() {
+    if best.len() < trimmed.len() || best != trimmed {
         Some(best)
     } else {
         None
     }
+}
+
+/// Shorten color values inside a `style` attribute string.
+/// E.g., `fill:#ffffff;stroke:#aabbcc` → `fill:#fff;stroke:#abc`
+fn shorten_colors_in_style(style: &str) -> Option<String> {
+    let mut result = String::with_capacity(style.len());
+    let mut any_changed = false;
+
+    for part in style.split(';') {
+        if !result.is_empty() {
+            result.push(';');
+        }
+        if let Some(colon) = part.find(':') {
+            let prop = part[..colon].trim();
+            let val = part[colon + 1..].trim();
+            // Check if this is a color property
+            if COLOR_ATTRS.contains(&prop)
+                && let Some(shorter) = shorten_color(val)
+                && shorter.len() < val.len()
+            {
+                result.push_str(prop);
+                result.push(':');
+                result.push_str(&shorter);
+                any_changed = true;
+                continue;
+            }
+        }
+        result.push_str(part);
+    }
+
+    if any_changed { Some(result) } else { None }
 }
 
 /// Shorten #rrggbb to #rgb if r==r, g==g, b==b.
@@ -181,6 +219,16 @@ mod tests {
         let output = serialize(&doc);
         assert!(output.contains("fill=\"red\""));
         assert!(output.contains("stroke=\"#abc\""));
+    }
+
+    #[test]
+    fn shortens_colors_in_style_attr() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"fill:#ffffff;stroke:#aabbcc\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertColors.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(output.contains("fill:#fff"));
+        assert!(output.contains("stroke:#abc"));
     }
 
     #[test]

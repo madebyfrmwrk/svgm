@@ -12,16 +12,15 @@ use svgm_core::Config;
 #[derive(Clone, Copy, ValueEnum)]
 enum CliPreset {
     Safe,
-    Balanced,
-    Aggressive,
+    #[value(alias = "balanced", alias = "aggressive")]
+    Default,
 }
 
 impl From<CliPreset> for svgm_core::Preset {
     fn from(p: CliPreset) -> Self {
         match p {
             CliPreset::Safe => svgm_core::Preset::Safe,
-            CliPreset::Balanced => svgm_core::Preset::Balanced,
-            CliPreset::Aggressive => svgm_core::Preset::Aggressive,
+            CliPreset::Default => svgm_core::Preset::Default,
         }
     }
 }
@@ -43,18 +42,17 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Optimization preset [default: balanced]
+    /// Optimization preset
     #[arg(
         long,
         value_enum,
-        long_help = "Optimization preset [default: balanced]\n\n  \
-                     safe:       removal and normalization only (17 passes)\n  \
-                     balanced:   full optimization (24 passes)\n  \
-                     aggressive: full optimization, lower precision"
+        long_help = "Optimization preset [default: default]\n\n  \
+                     safe:    removal and normalization only\n  \
+                     default: full optimization"
     )]
     preset: Option<CliPreset>,
 
-    /// Decimal digits for numeric rounding [default: 3, or 2 with aggressive]
+    /// Decimal digits for numeric rounding [default: 3]
     #[arg(long, value_name = "N")]
     precision: Option<u32>,
 

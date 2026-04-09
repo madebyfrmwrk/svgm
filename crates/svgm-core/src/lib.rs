@@ -13,7 +13,7 @@ pub struct OptimizeOutput {
     pub iterations: usize,
 }
 
-/// Optimize an SVG string using the default Balanced preset.
+/// Optimize an SVG string using the Default preset.
 /// Returns the optimized SVG string and the number of convergence iterations.
 pub fn optimize(input: &str) -> Result<OptimizeOutput, ParseError> {
     optimize_with_config(input, &Config::default())

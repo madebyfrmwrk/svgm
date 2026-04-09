@@ -29,44 +29,6 @@ impl Pass for ConvertShapeToPath {
 
             let shape_name = elem.name.as_str();
             match shape_name {
-                "ellipse" | "rect" | "circle" | "line" | "polyline" | "polygon" => {}
-                _ => continue,
-            }
-
-            // Ellipse sub-optimization: ellipse with rx≈ry → circle
-            if shape_name == "ellipse" {
-                let rx = parse_attr(elem, "rx");
-                let ry = parse_attr(elem, "ry");
-                if let (Some(rx_val), Some(ry_val)) = (rx, ry)
-                    && approx_eq(rx_val, ry_val, self.precision)
-                {
-                    let r_str = fmt(rx_val, self.precision);
-                    let node = doc.node_mut(id);
-                    if let NodeKind::Element(ref mut elem) = node.kind {
-                        elem.name = "circle".to_string();
-                        elem.attributes
-                            .retain(|a| a.prefix.is_some() || (a.name != "rx" && a.name != "ry"));
-                        elem.attributes.push(Attribute {
-                            prefix: None,
-                            name: "r".to_string(),
-                            value: r_str,
-                        });
-                    }
-                    changed = true;
-                    // Fall through — re-read as circle for possible path conversion
-                }
-            }
-
-            // Re-read after possible ellipse→circle mutation
-            let node = doc.node(id);
-            let elem = match &node.kind {
-                NodeKind::Element(e) => e,
-                _ => continue,
-            };
-            let shape_name = elem.name.as_str();
-
-            // Skip non-shape elements (ellipse that didn't become circle still falls through)
-            match shape_name {
                 "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {}
                 _ => continue,
             }
@@ -563,18 +525,16 @@ mod tests {
         assert_eq!(result, PassResult::Unchanged);
     }
 
-    // --- Ellipse sub-optimization ---
+    // --- Ellipse ---
 
     #[test]
-    fn ellipse_equal_radii_to_circle() {
+    fn ellipse_equal_radii_unchanged_by_this_pass() {
+        // convertEllipseToCircle handles ellipse→circle conversion as a separate pass.
+        // This pass only converts shapes to paths when shorter.
         let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><ellipse cx=\"50\" cy=\"50\" rx=\"25\" ry=\"25\"/></svg>";
         let (result, output) = run_pass(input);
-        assert_eq!(result, PassResult::Changed);
-        // Becomes a circle (shorter element name + one attr instead of two)
-        // but does NOT become a path (arc path is longer than circle element)
-        assert!(output.contains("<circle"));
-        assert!(output.contains("r=\"25\""));
-        assert!(!output.contains("<ellipse"));
+        assert_eq!(result, PassResult::Unchanged);
+        assert!(output.contains("<ellipse"));
     }
 
     // --- Edge cases ---
