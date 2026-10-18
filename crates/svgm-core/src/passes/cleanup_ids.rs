@@ -145,8 +145,8 @@ impl Pass for CleanupIds {
 
                     // Update references in attributes
                     for attr in &mut elem.attributes {
-                        // url(#id) references
-                        if attr.value.contains("url(#") {
+                        // url(#id) references, quoted or not
+                        if attr.value.contains("url(") {
                             let new_val = replace_url_refs(&attr.value, &rename_map);
                             if new_val != attr.value {
                                 attr.value = new_val;
@@ -202,21 +202,43 @@ impl Pass for CleanupIds {
 
 // --- Reference extraction helpers ---
 
-/// Extract all IDs from `url(#id)` patterns in an attribute value.
+/// Split a `url(...)` argument into `(prefix, id, suffix)` where the prefix
+/// is the optional whitespace and quote before `#`, and the suffix the
+/// matching closing quote and whitespace. `None` when it is not a `#id`
+/// reference (`url(data:...)`, `url(file.svg#x)`).
+fn split_url_arg(arg: &str) -> Option<(&str, &str, &str)> {
+    let trimmed_start = arg.trim_start();
+    let lead = arg.len() - trimmed_start.len();
+    let (quote, body) = match trimmed_start.as_bytes().first() {
+        Some(&q @ (b'\'' | b'"')) => (Some(q), &trimmed_start[1..]),
+        _ => (None, trimmed_start),
+    };
+    let body = body.strip_prefix('#')?;
+    let id_end = match quote {
+        Some(q) => body.find(q as char)?,
+        None => body.trim_end().len(),
+    };
+    let id = &body[..id_end];
+    if id.is_empty() {
+        return None;
+    }
+    let prefix_len = lead + usize::from(quote.is_some()) + 1;
+    Some((&arg[..prefix_len], id, &arg[prefix_len + id_end..]))
+}
+
+/// Extract all IDs from `url(#id)` / `url('#id')` / `url("#id")` patterns
+/// in an attribute value.
 fn extract_url_refs(value: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut search = value;
-    while let Some(start) = search.find("url(#") {
-        let rest = &search[start + 5..];
-        if let Some(end) = rest.find(')') {
-            let id = rest[..end]
-                .trim()
-                .trim_matches(|c: char| c == '\'' || c == '"');
-            if !id.is_empty() {
-                refs.push(id.to_string());
-            }
+    while let Some(start) = search.find("url(") {
+        let rest = &search[start + 4..];
+        if let Some(end) = rest.find(')')
+            && let Some((_, id, _)) = split_url_arg(&rest[..end])
+        {
+            refs.push(id.to_string());
         }
-        search = &search[start + 5..];
+        search = rest;
     }
     refs
 }
@@ -269,26 +291,27 @@ fn extract_css_id_refs(text: &str, known_ids: &HashSet<String>) -> Vec<String> {
 
 // --- Reference replacement helpers ---
 
-/// Replace `url(#old_id)` with `url(#new_id)` in an attribute value.
+/// Replace `url(#old_id)` (also quoted: `url('#old_id')`) with the renamed
+/// id in an attribute value, keeping the quoting as written.
 fn replace_url_refs(value: &str, rename_map: &HashMap<String, String>) -> String {
     let mut result = String::with_capacity(value.len());
     let mut search = value;
-    while let Some(start) = search.find("url(#") {
-        result.push_str(&search[..start + 5]);
-        let rest = &search[start + 5..];
-        if let Some(end) = rest.find(')') {
-            let raw_id = &rest[..end];
-            let id = raw_id.trim().trim_matches(|c: char| c == '\'' || c == '"');
-            if let Some(new_name) = rename_map.get(id) {
-                result.push_str(new_name);
-            } else {
-                result.push_str(raw_id);
-            }
-            search = &rest[end..];
-        } else {
+    while let Some(start) = search.find("url(") {
+        result.push_str(&search[..start + 4]);
+        let rest = &search[start + 4..];
+        let Some(end) = rest.find(')') else {
             result.push_str(rest);
             return result;
+        };
+        match split_url_arg(&rest[..end]) {
+            Some((prefix, id, suffix)) => {
+                result.push_str(prefix);
+                result.push_str(rename_map.get(id).map_or(id, String::as_str));
+                result.push_str(suffix);
+            }
+            None => result.push_str(&rest[..end]),
         }
+        search = &rest[end..];
     }
     result.push_str(search);
     result
@@ -504,6 +527,31 @@ mod tests {
         let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><clipPath id=\"a\"><rect width=\"10\" height=\"10\"/></clipPath></defs><rect clip-path=\"url(#a)\"/></svg>";
         let (result, _) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn quoted_url_references_are_renamed() {
+        // SVGO cleanupIds.01: fill="url('#gradient001')"
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"gradient001\"/><linearGradient id=\"gradient002\"/><linearGradient id=\"gradient003\"/></defs><rect fill=\"url('#gradient001')\"/><rect fill=\"url(&quot;#gradient002&quot;)\"/><rect fill=\"url( #gradient003 )\"/><rect fill=\"url(data:image/png;base64,#notanid)\"/></svg>";
+        let (_, output) = run_pass(input);
+        assert!(output.contains("fill=\"url('#a')\""), "{output}");
+        assert!(output.contains("fill=\"url(&quot;#b&quot;)\""), "{output}");
+        assert!(output.contains("fill=\"url( #c )\""), "{output}");
+        assert!(
+            output.contains("url(data:image/png;base64,#notanid)"),
+            "{output}"
+        );
+        assert!(!output.contains("gradient00"), "{output}");
+    }
+
+    #[test]
+    fn split_url_arg_shapes() {
+        assert_eq!(split_url_arg("#x"), Some(("#", "x", "")));
+        assert_eq!(split_url_arg("'#x'"), Some(("'#", "x", "'")));
+        assert_eq!(split_url_arg(" \"#x\" "), Some((" \"#", "x", "\" ")));
+        assert_eq!(split_url_arg("data:x"), None);
+        assert_eq!(split_url_arg("'#x"), None);
+        assert_eq!(split_url_arg("#"), None);
     }
 
     #[test]
