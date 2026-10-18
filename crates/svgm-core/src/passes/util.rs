@@ -549,8 +549,14 @@ pub(crate) fn split_property(decl: &str) -> Option<(&str, &str)> {
 fn strip_important(value: &str) -> &str {
     let v = value.trim();
     const KW: &str = "important";
-    if v.len() >= KW.len() && v[v.len() - KW.len()..].eq_ignore_ascii_case(KW) {
-        let before = v[..v.len() - KW.len()].trim_end();
+    // Compare on bytes: `v.len() - KW.len()` need not be a char boundary when
+    // the value ends in a multi-byte character, and slicing there would panic.
+    let cut = v.len().wrapping_sub(KW.len());
+    if v.len() >= KW.len()
+        && v.is_char_boundary(cut)
+        && v.as_bytes()[cut..].eq_ignore_ascii_case(KW.as_bytes())
+    {
+        let before = v[..cut].trim_end();
         if let Some(rest) = before.strip_suffix('!') {
             return rest.trim();
         }
@@ -953,6 +959,25 @@ mod tests {
         assert_eq!(strip_important("red !important"), "red");
         assert_eq!(strip_important("red ! IMPORTANT "), "red");
         assert_eq!(strip_important("red!important"), "red");
+        assert_eq!(strip_important("important"), "important");
+    }
+
+    #[test]
+    fn strip_important_never_slices_inside_a_char() {
+        // A value whose last 9 bytes start mid-character used to panic.
+        for v in [
+            "fill:ǎǎǎǎǎ",
+            "ǎǎǎǎǎ",
+            "€€€€",
+            "red !importanǎ",
+            "ǎ!important",
+            "x",
+        ] {
+            let _ = strip_important(v);
+        }
+        assert_eq!(strip_important("red !important"), "red");
+        assert_eq!(strip_important("red ! IMPORTANT "), "red");
+        assert_eq!(strip_important("ǎ !important"), "ǎ");
         assert_eq!(strip_important("important"), "important");
     }
 }
