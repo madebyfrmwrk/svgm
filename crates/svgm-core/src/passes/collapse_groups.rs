@@ -32,6 +32,16 @@ impl Pass for CollapseGroups {
 
                 let children: Vec<NodeId> = doc.children(id).collect();
 
+                // A group that declares a namespace (`xmlns:foo`) is the
+                // scope of that declaration: unwrapping it, or merging it
+                // into its child, would leave `foo:*` descendants without a
+                // declaration (ill-formed XML). removeUnusedNamespaces drops
+                // unused declarations first, so this only keeps groups whose
+                // prefix is really used inside.
+                if !elem.namespaces.is_empty() {
+                    continue;
+                }
+
                 // Case 1: Empty group (no meaningful children) — handled by remove_empty_containers
                 // Case 2: Group with no attributes — unwrap children to parent
                 if elem.attributes.is_empty()
@@ -335,5 +345,25 @@ mod tests {
             output.contains("<g"),
             "outer group must be preserved: {output}"
         );
+    }
+
+    #[test]
+    fn group_declaring_used_namespace_is_kept() {
+        // The declaration scopes the foo:* descendants; neither unwrapping
+        // (no attributes) nor merging into a single child may drop it.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g xmlns:foo="urn:foo"><foo:bar/><rect foo:attr="1"/></g><g xmlns:foo="urn:foo" fill="red"><rect foo:attr="1"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
+    }
+
+    #[test]
+    fn group_with_unused_namespace_is_collapsed_after_cleanup() {
+        // removeUnusedNamespaces strips the unused declaration first, then
+        // the group collapses as usual.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g xmlns:foo="urn:foo"><rect width="1" height="1"/></g></svg>"#;
+        let out = crate::optimize(input).unwrap().data;
+        assert!(!out.contains("<g"), "{out}");
+        assert!(!out.contains("xmlns:foo"), "{out}");
     }
 }

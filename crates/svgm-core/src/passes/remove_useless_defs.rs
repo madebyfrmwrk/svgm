@@ -62,11 +62,15 @@ fn is_useful(e: &Element) -> bool {
 /// descendants inherit or how they are positioned. Any unprefixed attribute
 /// (except `data-*`) or an `xml:` attribute (`xml:space`, `xml:lang`) is
 /// treated as significant; editor namespaces (`inkscape:label`, ...) are not.
+/// A wrapper that declares a namespace (`xmlns:foo`) is kept too: hoisting
+/// its `foo:*` descendants out of it would leave them without a declaration
+/// and the output ill-formed.
 fn is_unwrappable(e: &Element) -> bool {
-    e.attributes.iter().all(|a| match &a.prefix {
-        None => a.name.starts_with("data-"),
-        Some(p) => p != "xml",
-    })
+    e.namespaces.is_empty()
+        && e.attributes.iter().all(|a| match &a.prefix {
+            None => a.name.starts_with("data-"),
+            Some(p) => p != "xml",
+        })
 }
 
 /// Rewrite `container`'s children to the useful elements among its
@@ -313,6 +317,25 @@ mod tests {
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn wrapper_declaring_a_namespace_is_kept() {
+        // The declaration lives on the wrapper; unwrapping would strand the
+        // foo:* element and attribute (ill-formed XML). The wrapper is kept
+        // and only pruned inside.
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><defs><g xmlns:foo="urn:foo"><foo:bar id="q"/><path/><linearGradient id="g" foo:attr="1"><stop/></linearGradient></g></defs><rect fill="url(#g)"/><use href="#q"/></svg>"##;
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><defs><g xmlns:foo="urn:foo"><foo:bar id="q"/><linearGradient id="g" foo:attr="1"><stop/></linearGradient></g></defs><rect fill="url(#g)"/><use href="#q"/></svg>"##
+        );
+        // Through the whole pipeline the declaration must still be there.
+        let out = crate::optimize(input).unwrap().data;
+        assert!(out.contains("xmlns:foo=\"urn:foo\""), "{out}");
+        assert!(out.contains("<foo:bar id="), "{out}");
+        assert!(out.contains("foo:attr=\"1\""), "{out}");
     }
 
     #[test]
