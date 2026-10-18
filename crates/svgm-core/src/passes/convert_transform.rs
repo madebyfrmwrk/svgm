@@ -1,5 +1,11 @@
+use std::collections::HashSet;
+
 use super::convert_path_data::{parse_path, serialize_path};
-use super::{Pass, PassResult, parse_svg_number, representable};
+use super::{
+    MOVEABLE_ELEMENTS, Pass, PassResult, animation_targets, descendants, has_animated_attr_deep,
+    has_animation_child, has_group_only_prop, has_url_reference, parse_svg_number, representable,
+    style_declaration, stylesheet_contains,
+};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct ConvertTransform {
@@ -20,8 +26,11 @@ impl Pass for ConvertTransform {
     fn run(&self, doc: &mut Document) -> PassResult {
         let mut changed = false;
         let ids = doc.traverse();
+        let targets = animation_targets(doc);
+        let css_transform = stylesheet_contains(doc, "transform");
 
         for id in ids {
+            let bake_ok = can_bake(doc, id, &targets, css_transform);
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind {
                 // Process transform, gradientTransform, and patternTransform
@@ -81,7 +90,7 @@ impl Pass for ConvertTransform {
                 }
 
                 // Try to apply pure translate directly to element coordinates
-                if let Some((tx, ty)) = matrix.as_translate(self.precision) {
+                if bake_ok && let Some((tx, ty)) = matrix.as_translate(self.precision) {
                     if apply_translate_to_element(elem, tx, ty, self.precision) {
                         elem.attributes.remove(pos);
                         changed = true;
@@ -141,11 +150,61 @@ impl Pass for ConvertTransform {
     }
 }
 
-/// Attributes with group-level semantics that should prevent transform push-down.
-const GROUP_ONLY_ATTRS: &[&str] = &["clip-path", "mask", "filter"];
+/// Text-positioning attributes: a `<text>` whose descendants carry any of
+/// these cannot be moved by adjusting the `<text>` x/y alone.
+const TEXT_POSITION_ATTRS: &[&str] = &["x", "y", "dx", "dy"];
+
+/// True when a pure translate may be baked into the element's own
+/// coordinates (Phase 2). Mirrors SVGO `applyTransforms`' refusals:
+/// - no `id` (the element may be instanced by `<use>` or scripted),
+/// - no `style` attribute (styles are not considered when applying),
+/// - no `url(#...)` reference (userSpaceOnUse gradients, clip paths, masks,
+///   markers and filters live in the untransformed user space),
+/// - not the target of a SMIL animation,
+/// - no possible CSS `transform` rule on the element (a stylesheet that
+///   mentions `transform` plus a `class` to match),
+/// - for `<text>`, no positioned descendants (`x`/`y`/`dx`/`dy`) and no
+///   `<textPath>`/`<tref>`.
+fn can_bake(doc: &Document, id: NodeId, targets: &HashSet<NodeId>, css_transform: bool) -> bool {
+    let NodeKind::Element(ref elem) = doc.node(id).kind else {
+        return false;
+    };
+    if elem.attr("id").is_some() || elem.attr("style").is_some() {
+        return false;
+    }
+    if has_url_reference(elem) {
+        return false;
+    }
+    if targets.contains(&id) {
+        return false;
+    }
+    if css_transform && elem.attr("class").is_some() {
+        return false;
+    }
+    if elem.name == "text" {
+        for d in descendants(doc, id) {
+            if let NodeKind::Element(ref e) = doc.node(d).kind
+                && (e.name == "textPath"
+                    || e.name == "tref"
+                    || TEXT_POSITION_ATTRS.iter().any(|&a| e.attr(a).is_some()))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 impl ConvertTransform {
     /// Push transforms from single-child groups down to the child element.
+    ///
+    /// Refuses (SVGO `collapseGroups` / `moveGroupAttrsToElems` guards) when
+    /// the group has clip-path/mask/filter (attribute or style), when the
+    /// child is not a renderable element that takes `transform`
+    /// ([`MOVEABLE_ELEMENTS`]: never into clipPath/mask/symbol/gradients),
+    /// when the child has an `id`, when either side has a CSS transform,
+    /// when the group has animation children, or when the child subtree
+    /// animates `transform`.
     fn push_transforms_down(&self, doc: &mut Document) -> bool {
         let mut changed = false;
         let ids = doc.traverse();
@@ -157,7 +216,7 @@ impl ConvertTransform {
                 let NodeKind::Element(ref elem) = node.kind else {
                     continue;
                 };
-                if elem.name != "g" {
+                if elem.name != "g" || elem.prefix.is_some() {
                     continue;
                 }
                 let has_transform = elem
@@ -167,24 +226,30 @@ impl ConvertTransform {
                 if !has_transform {
                     continue;
                 }
-                // Skip groups with group-level semantic attrs
-                let has_group_only = elem
-                    .attributes
-                    .iter()
-                    .any(|a| GROUP_ONLY_ATTRS.contains(&a.name.as_str()));
-                if has_group_only {
+                // Skip groups with group-level semantic props (attr or style)
+                if has_group_only_prop(elem) || style_declaration(elem, "transform").is_some() {
+                    continue;
+                }
+                if has_animation_child(doc, id) {
                     continue;
                 }
                 let children: Vec<NodeId> = doc.children(id).collect();
                 if children.len() != 1 {
                     continue;
                 }
-                let child = doc.node(children[0]);
-                if matches!(child.kind, NodeKind::Element(_)) {
-                    children[0]
-                } else {
+                let child_id = children[0];
+                let NodeKind::Element(ref child) = doc.node(child_id).kind else {
+                    continue;
+                };
+                if child.prefix.is_some()
+                    || !MOVEABLE_ELEMENTS.contains(&child.name.as_str())
+                    || child.attr("id").is_some()
+                    || style_declaration(child, "transform").is_some()
+                    || has_animated_attr_deep(doc, child_id, "transform")
+                {
                     continue;
                 }
+                child_id
             };
 
             // Get group transform matrix
@@ -657,7 +722,9 @@ fn apply_translate_to_element(
     let attr_pairs: &[(&str, &str)] = match name {
         "rect" | "image" | "foreignObject" => &[("x", "y")],
         "circle" | "ellipse" => &[("cx", "cy")],
-        "text" | "tspan" => &[("x", "y")],
+        // <text> only when no descendant is positioned (see `can_bake`);
+        // <tspan> cannot carry a transform at all.
+        "text" => &[("x", "y")],
         "use" => &[("x", "y")],
         "line" => &[("x1", "y1"), ("x2", "y2")],
         _ => return false,
@@ -1112,7 +1179,7 @@ mod tests {
 
     #[test]
     fn skips_pushdown_with_clip_path() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)" clip-path="url(#c)"><rect/></g></svg>"#;
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)" clip-path="url(#c)"><rect/></g></svg>"##;
         let mut doc = parse(input).unwrap();
         ConvertTransform::default().run(&mut doc);
         let output = serialize(&doc);
@@ -1185,5 +1252,205 @@ mod tests {
         assert!(out.contains("rotate(1e999)"), "{out}");
         assert!(out.contains("translate(1e308,1e308)"), "{out}");
         assert!(out.contains("x=\"5\""), "{out}");
+    }
+
+    // ── Phase 2: can_bake guards (SVGO applyTransforms refusals) ───────
+
+    fn run(input: &str) -> String {
+        let mut doc = parse(input).unwrap();
+        let _ = ConvertTransform::default().run(&mut doc);
+        serialize(&doc)
+    }
+
+    #[test]
+    fn translate_is_not_baked_into_element_with_id() {
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect id="r" transform="translate(10,20)" width="5" height="5"/></svg>"#,
+        );
+        assert!(out.contains(r#"transform="translate(10,20)""#), "{out}");
+        assert!(!out.contains("x="), "{out}");
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path id="p" transform="translate(10,20)" d="M0 0h10"/></svg>"#,
+        );
+        assert!(
+            out.contains("transform=") && out.contains(r#"d="M0 0h10""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn translate_is_not_baked_into_element_with_url_reference() {
+        for attrs in [
+            r##"clip-path="url(#c)""##,
+            r##"fill="url(#g)""##,
+            r##"stroke="url(#g)""##,
+            r##"mask="url(#m)""##,
+            r##"filter="url(#f)""##,
+            r##"marker-end="url(#m)""##,
+            r##"style="fill:url(#g)""##,
+            r#"style="opacity:.5""#,
+        ] {
+            let out = run(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><path {attrs} transform="translate(10,20)" d="M0 0h10v10H0z"/><rect {attrs} transform="translate(10,20)" width="5" height="5"/></svg>"#
+            ));
+            assert_eq!(
+                out.matches("transform=\"translate(10,20)\"").count(),
+                2,
+                "{attrs}: {out}"
+            );
+            assert!(out.contains(r#"d="M0 0h10v10H0z""#), "{attrs}: {out}");
+            assert!(!out.contains(" x="), "{attrs}: {out}");
+        }
+    }
+
+    #[test]
+    fn translate_is_not_baked_into_animation_target() {
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect transform="translate(10,20)" width="5" height="5"><animate attributeName="x" from="0" to="5" dur="1s"/></rect></svg>"#,
+        );
+        assert!(out.contains(r#"transform="translate(10,20)""#), "{out}");
+        let out = run(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><rect id="r" transform="translate(10,20)" width="5" height="5"/><animate href="#r" attributeName="x" from="0" to="5" dur="1s"/></svg>"##,
+        );
+        assert!(out.contains(r#"transform="translate(10,20)""#), "{out}");
+    }
+
+    #[test]
+    fn translate_is_not_baked_when_stylesheet_may_set_transform() {
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.t{transform:rotate(45deg)}</style><rect class="t" transform="translate(10,20)" width="5" height="5"/></svg>"#,
+        );
+        assert!(out.contains(r#"transform="translate(10,20)""#), "{out}");
+        // A stylesheet that never mentions transform cannot override it.
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.t{fill:red}</style><rect class="t" transform="translate(10,20)" width="5" height="5"/></svg>"#,
+        );
+        assert!(
+            out.contains(r#"x="10" y="20""#) && !out.contains("transform"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn translate_is_baked_into_plain_text_but_not_positioned_text() {
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text transform="translate(10,20)">abc</text></svg>"#,
+        );
+        assert!(out.contains(r#"<text x="10" y="20">abc</text>"#), "{out}");
+        for inner in [
+            r#"<tspan x="5">a</tspan>"#,
+            r#"<tspan dy="1.2em">a</tspan>"#,
+            r#"<tspan><tspan y="3">a</tspan></tspan>"#,
+            r##"<textPath href="#p">a</textPath>"##,
+            r##"<tref href="#t"/>"##,
+        ] {
+            let out = run(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><text transform="translate(10,20)">{inner}</text></svg>"#
+            ));
+            assert!(
+                out.contains(r#"transform="translate(10,20)""#),
+                "{inner}: {out}"
+            );
+            assert!(!out.contains(r#"<text x="#), "{inner}: {out}");
+        }
+        // <tspan> never takes a transform of its own; leave it untouched.
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text><tspan transform="translate(10,20)">a</tspan></text></svg>"#,
+        );
+        assert!(
+            out.contains(r#"<tspan transform="translate(10,20)">"#),
+            "{out}"
+        );
+    }
+
+    // ── Phase 3: push-down guards (WP2-24/25/26) ───────────────────────
+
+    #[test]
+    fn pushdown_skips_resource_children() {
+        for child in [
+            r#"<clipPath id="c"><rect width="10" height="10"/></clipPath>"#,
+            r#"<mask id="c"><rect width="10" height="10"/></mask>"#,
+            r#"<symbol id="c"><rect width="10" height="10"/></symbol>"#,
+            r#"<linearGradient><stop offset="0"/></linearGradient>"#,
+            r#"<foreignObject><div/></foreignObject>"#,
+        ] {
+            let out = run(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="scale(2)">{child}</g></svg>"#
+            ));
+            assert!(out.contains(r#"<g transform="scale(2)">"#), "{out}");
+        }
+    }
+
+    #[test]
+    fn pushdown_skips_child_with_id() {
+        // SVGO moveGroupAttrsToElems.06
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><g transform="translate(0 -140)"><path id="c" transform="scale(.5)" d="M0,0 L10,20"/></g><use xlink:href="#c" transform="translate(-140)"/></svg>"##;
+        let out = run(input);
+        assert!(
+            out.contains(r#"<g transform="translate(0,-140)">"#)
+                || out.contains(r#"<g transform="translate(0 -140)">"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"transform="scale(.5)""#) || out.contains(r#"transform="scale(0.5)""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn pushdown_skips_animated_transform_and_animation_children() {
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="rotate(-90 25 0)"><circle r="20"><animateTransform attributeName="transform" type="rotate" values="0;274;360" dur="2.2s"/></circle></g></svg>"#,
+        );
+        assert!(out.contains(r#"<g transform="rotate(-90 25 0)">"#), "{out}");
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="scale(2)"><animateTransform attributeName="transform" type="rotate" values="0;360" dur="1s"/></g></svg>"#,
+        );
+        assert!(out.contains(r#"<g transform="scale(2)">"#), "{out}");
+    }
+
+    #[test]
+    fn pushdown_skips_style_filter_and_css_transform() {
+        // SVGO collapseGroups.17: filter via style keeps the transform on the group.
+        let out = run(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 88 88\"><filter id=\"a\"><feGaussianBlur stdDeviation=\"1\"/></filter><g transform=\"matrix(0.6875,0,0,0.6875,20.34375,66.34375)\" style=\"filter:url(#a)\"><path d=\"M 33.346591,-83.471591 L -10.744318,-36.471591 L -10.49989,-32.5\" style=\"fill-opacity:1\"/></g></svg>",
+        );
+        assert!(
+            out.contains(
+                "<g style=\"filter:url(#a)\" transform=\"translate(20.344 66.344)scale(0.688)\">"
+            ) || out.contains(
+                "<g transform=\"translate(20.344 66.344)scale(0.688)\" style=\"filter:url(#a)\">"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("<path d=\"M 33.346591,-83.471591 L -10.744318,-36.471591 L -10.49989,-32.5\" style=\"fill-opacity:1\"/>"), "{out}");
+        for style in ["clip-path:url(#c)", "mask:url(#m)", "filter:"] {
+            let out = run(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="{style}" transform="scale(2)"><path d="M0 0h1"/></g></svg>"#
+            ));
+            assert!(
+                out.contains(r#"transform="scale(2)"><path"#),
+                "{style}: {out}"
+            );
+        }
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="scale(2)"><path style="transform:rotate(45deg)" d="M0 0h1"/></g></svg>"#,
+        );
+        assert!(out.contains(r#"<g transform="scale(2)">"#), "{out}");
+        let out = run(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="transform:rotate(45deg)" transform="scale(2)"><path d="M0 0h1"/></g></svg>"#,
+        );
+        assert!(out.contains(r#"transform="scale(2)"><path"#), "{out}");
+    }
+
+    #[test]
+    fn full_optimize_keeps_clipped_translate_and_resource_group() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><clipPath id="c" clipPathUnits="userSpaceOnUse"><rect width="10" height="10"/></clipPath><path clip-path="url(#c)" transform="translate(100,100)" d="M0 0h10v10H0z"/><g transform="scale(2)"><clipPath id="d"><rect width="10" height="10"/></clipPath></g><rect width="100" height="100" clip-path="url(#d)"/></svg>"##;
+        let out = crate::optimize(input).unwrap().data;
+        assert!(out.contains(r#"transform="translate(100,100)""#), "{out}");
+        assert!(
+            out.contains(r#"<g transform="scale(2)"><clipPath"#),
+            "{out}"
+        );
     }
 }
