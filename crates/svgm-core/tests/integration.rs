@@ -337,3 +337,50 @@ fn non_finite_numbers_never_reach_the_output() {
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 }
+
+#[test]
+fn switch_fallback() {
+    // draw.io / Illustrator exports: every direct child of <switch> is an
+    // alternative branch. The empty requiredFeatures branch and the
+    // multi-child fallback group must both survive, in both presets.
+    let input = fs::read_to_string("tests/fixtures/regression/switch_fallback.svg").unwrap();
+    for preset in [svgm_core::Preset::Safe, svgm_core::Preset::Default] {
+        let config = svgm_core::Config {
+            preset,
+            ..Default::default()
+        };
+        let output = svgm_core::optimize_with_config(&input, &config)
+            .unwrap()
+            .data;
+        assert_valid_svg(&output, "switch_fallback");
+        assert_eq!(
+            output.matches("<switch>").count(),
+            2,
+            "{preset:?}: {output}"
+        );
+        // draw.io: empty branch then the <a> fallback
+        assert!(
+            output.contains("<switch><g") && output.contains("</g><a "),
+            "{preset:?}: {output}"
+        );
+        assert!(
+            output.contains("Viewer does not support full SVG 1.1"),
+            "{preset:?}: {output}"
+        );
+        // Illustrator: foreignObject branch then the drawing group
+        assert!(output.contains("<foreignObject"), "{preset:?}: {output}");
+        assert!(
+            output.contains("</g><g>") || output.contains("</g><g "),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("fill=\"red\""), "{preset:?}: {output}");
+        assert!(
+            output.contains("fill=\"blue\"") || output.contains("fill=\"#00f\""),
+            "{preset:?}: {output}"
+        );
+        let again = svgm_core::optimize_with_config(&output, &config)
+            .unwrap()
+            .data;
+        assert_eq!(again, output, "{preset:?}: not idempotent");
+    }
+}
