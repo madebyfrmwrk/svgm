@@ -406,6 +406,62 @@ const DECLARATION_AT_RULES: &[&str] = &[
     "view-transition",
 ];
 
+/// Every `property: value` declaration found in the innermost `{}` blocks of
+/// all `<style>` elements, regardless of selector and nesting depth (rules
+/// inside `@media`/`@supports` are included, so a consumer can ask "could any
+/// stylesheet rule set `marker-mid` on some element?" without resolving
+/// selectors). Values keep their text verbatim (trailing `!important`
+/// included). Comments are stripped first; string literals are skipped so a
+/// brace inside `content:"}"` does not end a block.
+pub(crate) fn stylesheet_declarations(doc: &Document) -> Vec<(String, String)> {
+    let css = strip_css_comments(&stylesheet_text(doc));
+    let mut out = Vec::new();
+    let chars: Vec<char> = css.chars().collect();
+    // Start index (exclusive of the brace) of each currently open block, and
+    // whether a nested block has been seen inside it.
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' => {
+                if let Some(top) = stack.last_mut() {
+                    top.1 = true;
+                }
+                stack.push((i + 1, false));
+            }
+            '}' => {
+                if let Some((start, nested)) = stack.pop()
+                    && !nested
+                {
+                    let block: String = chars[start..i].iter().collect();
+                    for decl in split_declarations(&block) {
+                        if let Some((name, value)) = split_property(decl) {
+                            out.push((name.to_string(), value.to_string()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Attribute names used in attribute selectors (`[fill=black]`,
 /// `text[xml\:space]`) across all `<style>` elements. Only `[` in selector
 /// position counts: outside declaration blocks (but inside conditional group

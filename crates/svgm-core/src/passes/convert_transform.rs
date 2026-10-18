@@ -616,10 +616,24 @@ fn fmt(val: f64, precision: u32) -> String {
 
 /// Parse a transform attribute string and merge all transforms into a single matrix.
 fn parse_and_merge_transforms(s: &str) -> Option<Matrix> {
-    // Normalize European decimal commas: "0,7282" → "0.7282"
-    // A comma between digits (with no space before it) is a decimal separator.
-    // A comma followed by a space or preceded by a space is an argument separator.
-    let s = normalize_european_decimals(s);
+    // The raw string first: `translate(10,20), scale(2,2)` is a perfectly
+    // valid transform list (comma-wsp between functions, commas between
+    // arguments) and must never be reinterpreted. Only when it fails to
+    // parse (e.g. Inkscape's `translate(0,7282, 0,9693)` has four arguments)
+    // retry with European decimal commas normalized.
+    if let Some(m) = parse_transform_list(s) {
+        return Some(m);
+    }
+    let normalized = normalize_european_decimals(s);
+    if normalized == s {
+        return None;
+    }
+    parse_transform_list(&normalized)
+}
+
+/// Parse an SVG transform list and multiply it into a single matrix.
+/// Returns `None` on any syntax error or wrong argument count.
+fn parse_transform_list(s: &str) -> Option<Matrix> {
     let mut result = Matrix::identity();
     let mut chars = s.chars().peekable();
 
@@ -785,6 +799,9 @@ fn apply_offset(elem: &mut crate::ast::Element, attr_name: &str, offset: f64, pr
 /// Detection: if the string contains no dots and has "digit,digit" patterns,
 /// it uses European decimal commas. In that case, commas between digits (no surrounding
 /// space) are decimal separators; commas followed by space are argument separators.
+/// Only commas inside a parenthesized argument list are ever rewritten; a
+/// comma next to `)`, whitespace or a function name is a list separator.
+/// Callers use this only after the raw string failed to parse.
 fn normalize_european_decimals(s: &str) -> String {
     // Only apply if the string uses European format: no dots, has digit,digit patterns,
     // AND uses ", " (comma-space) as argument separators.
@@ -810,19 +827,23 @@ fn normalize_european_decimals(s: &str) -> String {
     // Work on bytes and copy everything else verbatim so non-ASCII content is
     // never re-encoded (same bug class as issue #23).
     let mut result: Vec<u8> = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b','
-            && i > 0
-            && bytes[i - 1].is_ascii_digit()
-            && i + 1 < bytes.len()
-            && bytes[i + 1].is_ascii_digit()
-        {
-            result.push(b'.');
-        } else {
-            result.push(bytes[i]);
+    let mut depth = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth > 0
+                && i > 0
+                && bytes[i - 1].is_ascii_digit()
+                && i + 1 < bytes.len()
+                && bytes[i + 1].is_ascii_digit() =>
+            {
+                result.push(b'.');
+                continue;
+            }
+            _ => {}
         }
-        i += 1;
+        result.push(b);
     }
     String::from_utf8(result).unwrap_or_else(|_| s.to_string())
 }
@@ -1222,6 +1243,106 @@ mod tests {
             "full optimize should collapse group: {}",
             result.data
         );
+    }
+
+    #[test]
+    fn translate_shifts_leading_relative_moveto() {
+        // The first `m` is absolute per spec: baking a translate into the
+        // path must shift it, while later `m` subpaths stay relative.
+        for (d, expected) in [
+            ("m5 5h10v10z", "M15 15h10v10z"),
+            ("m5 5h10v10zm20 0h5v5z", "M15 15h10v10zm20 0h5v5z"),
+            ("m5 5 10 0 0 10z", "M15 15l10 0 0 10z"),
+        ] {
+            assert_eq!(
+                apply_translate_to_path(d, 10.0, 10.0, 3).unwrap(),
+                expected,
+                "{d}"
+            );
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{d}\" transform=\"translate(10,10)\"/></svg>"
+            );
+            let mut doc = parse(&input).unwrap();
+            assert!(ConvertTransform::default().run(&mut doc).changed());
+            let out = serialize(&doc);
+            assert!(out.contains(&format!("d=\"{expected}\"")), "{out}");
+            assert!(!out.contains("transform"), "{out}");
+        }
+    }
+
+    #[test]
+    fn group_translate_pushed_into_relative_moveto_paths() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 400\">\
+            <g transform=\"translate(200 200)\"><path d=\"m5 5h10v10z\"/><path d=\"m50 50h10v10zm20 0h5v5z\" fill=\"red\"/></g></svg>";
+        let out = crate::optimize(input).unwrap().data;
+        assert!(out.contains("M205 205h10v10z"), "{out}");
+        assert!(out.contains("M250 250h10v10zm20 0h5v5z"), "{out}");
+        assert!(!out.contains("transform"), "{out}");
+    }
+
+    #[test]
+    fn comma_separated_transform_list_is_not_mangled() {
+        // Valid SVG: comma-wsp between functions, commas between arguments.
+        // The European-decimal heuristic used to rewrite it into
+        // translate(10.2)scale(2.2).
+        let m = parse_and_merge_transforms("translate(10,20), scale(2,2)").unwrap();
+        assert_eq!(
+            (m.a, m.b, m.c, m.d, m.e, m.f),
+            (2.0, 0.0, 0.0, 2.0, 10.0, 20.0)
+        );
+        let expected = Matrix::translate(10.0, 20.0).multiply(
+            &Matrix::translate(50.0, 50.0)
+                .multiply(&Matrix::rotate(45.0))
+                .multiply(&Matrix::translate(-50.0, -50.0)),
+        );
+        let m = parse_and_merge_transforms("translate(10,20) , rotate(45,50,50)").unwrap();
+        for (got, want) in [m.a, m.b, m.c, m.d, m.e, m.f].iter().zip([
+            expected.a, expected.b, expected.c, expected.d, expected.e, expected.f,
+        ]) {
+            assert!((got - want).abs() < 1e-9, "{m:?} vs {expected:?}");
+        }
+
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h10v20H0z\" transform=\"translate(10,20), scale(2,2)\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        let changed = ConvertTransform::default().run(&mut doc).changed();
+        let out = serialize(&doc);
+        assert!(changed, "{out}");
+        assert!(out.contains("transform=\"matrix(2,0,0,2,10,20)\""), "{out}");
+
+        // The comma-wsp list is merged, not left alone (a rotate about a
+        // point serializes longer than the source and is kept as is).
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\" transform=\"translate(10,20) , scale(2,2) , translate(1,1)\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        let changed = ConvertTransform::default().run(&mut doc).changed();
+        let out = serialize(&doc);
+        assert!(changed, "{out}");
+        assert!(out.contains("transform=\"matrix(2,0,0,2,12,22)\""), "{out}");
+    }
+
+    #[test]
+    fn european_decimal_fallback_only_when_raw_parse_fails() {
+        // Inkscape locale export: four arguments is not a valid translate,
+        // so the normalized form is used.
+        let m = parse_and_merge_transforms("translate(0,7282, 0,9693)").unwrap();
+        assert!((m.e - 0.7282).abs() < 1e-12 && (m.f - 0.9693).abs() < 1e-12);
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g transform=\"translate(0,7282, 0,9693)\"><path d=\"M0 0h5\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert!(ConvertTransform::default().run(&mut doc).changed());
+        let out = serialize(&doc);
+        assert!(out.contains("translate(0.728,0.969)"), "{out}");
+        assert!(!out.contains("7282"), "{out}");
+        // The normalizer never touches commas outside an argument list.
+        assert_eq!(
+            normalize_european_decimals("translate(0,7282, 0,9693),scale(1,5)"),
+            "translate(0.7282, 0.9693),scale(1.5)"
+        );
+        // Without a `, ` argument separator the heuristic does not fire.
+        assert_eq!(
+            normalize_european_decimals("scale(2) ,translate(1,5)"),
+            "scale(2) ,translate(1,5)"
+        );
+        // Garbage still fails after normalization.
+        assert!(parse_and_merge_transforms("translate(1,2,3, 4,5)").is_none());
     }
 
     #[test]

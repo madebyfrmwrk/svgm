@@ -123,6 +123,30 @@ pub(crate) fn representable(v: f64, precision: u32) -> bool {
     v.is_finite() && v.abs() < MAX_MAGNITUDE && (v * 10f64.powi(precision as i32)).is_finite()
 }
 
+/// Round `val` to `precision` decimals, preferring one decimal fewer when
+/// that loses less than `10^-precision` (SVGO's strongRound: 2.3491 -> 2.35,
+/// 5.0009 -> 5, but 1.0014 -> 1.001). The candidate is compared with the
+/// *original* value, not with the other rounded candidate; comparing two
+/// rounded doubles over-rounded 1.0014 to 1 through floating-point noise.
+/// A value that already fits the precision is returned as is. Returns `val`
+/// unchanged when `val * 10^precision` is not finite.
+pub(crate) fn strong_round(val: f64, precision: u32) -> f64 {
+    let factor = 10f64.powi(precision as i32);
+    let fixed = (val * factor).round() / factor;
+    if !fixed.is_finite() {
+        return val;
+    }
+    if precision == 0 || fixed == val {
+        return fixed;
+    }
+    let error = 1.0 / factor;
+    let factor_low = 10f64.powi(precision as i32 - 1);
+    let low = (val * factor_low).round() / factor_low;
+    let factor_high = 10f64.powi(precision as i32 + 1);
+    let diff = ((low - val).abs() * factor_high).round() / factor_high;
+    if diff >= error { fixed } else { low }
+}
+
 /// Returns the default set of passes in execution order (Default preset).
 pub fn default_passes() -> Vec<Box<dyn Pass>> {
     crate::config::passes_for_config(&crate::config::Config::default())

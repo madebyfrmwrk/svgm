@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <!-- Already-minified paths start with a relative `m`; the first moveto is
+       absolute per spec, so baking the group translate into the path data
+       must shift it. (The whole shape used to be displaced by -200,-200.) -->
+  <g transform="translate(200 200)">
+    <path d="m5 5h10v10z"/>
+    <path d="m50 50h10v10zm20 0h5v5z" fill="red"/>
+    <path d="m100 100 10 0 0 10z" fill="blue"/>
+  </g>
+</svg>

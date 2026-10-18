@@ -1,5 +1,8 @@
-use super::{Pass, PassResult, representable};
-use crate::ast::{Document, NodeKind};
+use super::{
+    Computed, Pass, PassResult, computed_style_with, representable, strong_round,
+    stylesheet_declarations,
+};
+use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct ConvertPathData {
     pub precision: u32,
@@ -20,14 +23,27 @@ impl Pass for ConvertPathData {
         let mut changed = false;
         let ids = doc.traverse();
 
+        // A stylesheet rule could attach markers to any path, so when one
+        // declares a marker property every path is treated as marked
+        // (SVGO's `hasMarkerMid` is derived from the computed style).
+        let markers_in_css = stylesheet_declarations(doc)
+            .iter()
+            .any(|(prop, _)| is_marker_prop(prop));
+
         for id in ids {
+            let has_d = matches!(&doc.node(id).kind, NodeKind::Element(e) if e.attr("d").is_some());
+            if !has_d {
+                continue;
+            }
+            let has_markers = markers_in_css || has_marker_style(doc, id);
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind
                 && let Some(d_attr) = elem
                     .attributes
                     .iter_mut()
                     .find(|a| a.name == "d" && a.prefix.is_none())
-                && let Some(optimized) = optimize_path(&d_attr.value, self.precision)
+                && let Some(optimized) =
+                    optimize_path_with(&d_attr.value, self.precision, has_markers)
                 && optimized.len() < d_attr.value.len()
             {
                 d_attr.value = optimized;
@@ -50,8 +66,39 @@ pub(crate) struct PathCmd {
     pub(crate) args: Vec<f64>,
 }
 
-/// Optimize a path `d` attribute string.
+fn is_marker_prop(prop: &str) -> bool {
+    matches!(
+        prop,
+        "marker" | "marker-start" | "marker-mid" | "marker-end"
+    )
+}
+
+/// True when `marker-start` or `marker-mid` (or the `marker` shorthand) is
+/// set on the element, its `style` attribute, or inherited from an ancestor.
+/// Such a path must keep every moveto, since each vertex places a marker.
+fn has_marker_style(doc: &Document, id: NodeId) -> bool {
+    ["marker-start", "marker-mid", "marker"].iter().any(|prop| {
+        match computed_style_with(doc, id, prop, false) {
+            Computed::Static(v) => {
+                let v = v.trim();
+                !v.is_empty() && v != "none"
+            }
+            Computed::Dynamic => true,
+            Computed::Unset => false,
+        }
+    })
+}
+
+/// Optimize a path `d` attribute string (no markers assumed).
+#[cfg(test)]
 fn optimize_path(d: &str, precision: u32) -> Option<String> {
+    optimize_path_with(d, precision, false)
+}
+
+/// Optimize a path `d` attribute string. `has_markers` keeps every moveto
+/// (a redundant `M` immediately followed by another `M` is otherwise
+/// dropped, which would move a `marker-start`/`marker-mid` glyph).
+fn optimize_path_with(d: &str, precision: u32, has_markers: bool) -> Option<String> {
     let commands = parse_path(d)?;
     if commands.is_empty() {
         return None;
@@ -64,13 +111,15 @@ fn optimize_path(d: &str, precision: u32) -> Option<String> {
     let commands = simplify_curves(commands, precision);
     let commands = convert_cubics_to_arcs(commands, precision);
     let commands = detect_shorthands(commands, precision);
-    let commands = remove_redundant(commands, precision);
+    let commands = remove_redundant(commands, precision, has_markers);
 
-    // Phase 3: Pick shorter abs/rel per command
+    // Phase 3: Merge runs of same-direction horizontal/vertical lines
+    // (h+h→h, v+v→v) while still absolute, so the abs/rel choice below sees
+    // the merged segment (SVGO collapses before picking the shorter form).
+    let commands = merge_collinear_lines(commands);
+
+    // Phase 4: Pick shorter abs/rel per command
     let commands = abs_to_rel(commands, precision);
-
-    // Phase 4: Merge consecutive same-direction lines (h+h→h, v+v→v)
-    let commands = merge_consecutive(commands, precision);
 
     // Phase 5: Simplify arc radii (round equal rx/ry to lower precision when safe)
     let commands = simplify_arc_radii(commands, precision);
@@ -479,12 +528,24 @@ fn try_cubic_to_quad(
     }
 }
 
-/// Check if point (px, py) is collinear with the line from (x0, y0) to (x1, y1).
+/// Check if control point (px, py) lies on the chord from (x0, y0) to
+/// (x1, y1), i.e. its perpendicular distance to the chord is within
+/// `10^-precision` (SVGO isCurveStraightLine). A curve whose end point equals
+/// its start has no chord and is never considered straight — flattening a
+/// closed single-cubic loop would delete it. The raw cross product is not
+/// used because it scales with the chord length: a 0.07-unit bulge on a
+/// 0.003-long chord looks tiny, while a 1e-8 bulge on a 7-unit chord looks
+/// large.
 fn is_collinear(x0: f64, y0: f64, px: f64, py: f64, x1: f64, y1: f64, precision: u32) -> bool {
-    // Cross product of vectors (x1-x0, y1-y0) and (px-x0, py-y0)
-    let cross = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0);
-    let tolerance = 0.5 / 10f64.powi(precision as i32);
-    cross.abs() < tolerance
+    let a = -(y1 - y0);
+    let b = x1 - x0;
+    let len_sq = a * a + b * b;
+    if len_sq == 0.0 || !len_sq.is_finite() {
+        return false;
+    }
+    let error = 10f64.powi(-(precision as i32));
+    let proj = a * (px - x0) + b * (py - y0);
+    (proj * proj / len_sq).sqrt() <= error
 }
 
 // ── Cubic-to-arc conversion ────────────────────────────────────────────
@@ -823,7 +884,7 @@ fn detect_shorthands(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
 }
 
 /// Remove redundant commands: lines to same point, empty subpaths.
-fn remove_redundant(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
+fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -> Vec<PathCmd> {
     let mut result = Vec::with_capacity(commands.len());
     let mut cx: f64 = 0.0;
     let mut cy: f64 = 0.0;
@@ -832,6 +893,16 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
 
     for (i, cmd) in commands.iter().enumerate() {
         match cmd.cmd {
+            // A moveto immediately followed by another moveto draws nothing:
+            // only the last one positions the pen (SVGO collapses `m`+`m`).
+            // Kept when markers are present, since marker-start/marker-mid
+            // are placed at every vertex including empty subpaths.
+            'M' if !has_markers && commands.get(i + 1).is_some_and(|n| n.cmd == 'M') => {
+                cx = cmd.args[0];
+                cy = cmd.args[1];
+                sx = cx;
+                sy = cy;
+            }
             'L' => {
                 let (x, y) = (cmd.args[0], cmd.args[1]);
                 // Skip line to same point
@@ -858,6 +929,16 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
             }
             'C' | 'S' | 'Q' | 'T' => {
                 let args = &cmd.args;
+                // A curve whose control points and end point all sit on the
+                // current point draws nothing (SVGO removeUseless drops an
+                // all-zero relative c/s/q/t). The straight-curve test refuses
+                // zero chords on purpose, so this is the only place it goes.
+                if args
+                    .chunks(2)
+                    .all(|p| approx_eq(p[0], cx, precision) && approx_eq(p[1], cy, precision))
+                {
+                    continue;
+                }
                 let (x, y) = (args[args.len() - 2], args[args.len() - 1]);
                 cx = x;
                 cy = y;
@@ -1022,6 +1103,16 @@ fn parse_path_inner(d: &str) -> Option<(Vec<PathCmd>, bool)> {
     if truncated && commands.is_empty() {
         // Nothing usable before the bad token: leave the attribute alone.
         return None;
+    }
+
+    // The first moveto is absolute per spec even when written `m` (SVGO's
+    // path2js does the same), so every consumer can treat `commands[0]` as
+    // `M` and shift/serialize it accordingly. Implicit pairs after it were
+    // already split into `l` above and stay relative.
+    if let Some(first) = commands.first_mut()
+        && first.cmd == 'm'
+    {
+        first.cmd = 'M';
     }
 
     Some((commands, truncated))
@@ -1331,90 +1422,184 @@ fn simplify_arc_radii(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
         return commands;
     }
     let error = 10f64.powi(-(precision as i32));
+    let mut result = Vec::with_capacity(commands.len());
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
 
-    commands
-        .into_iter()
-        .map(|mut cmd| {
-            if matches!(cmd.cmd, 'A' | 'a') && cmd.args.len() >= 7 {
-                let rx = cmd.args[0];
-                let ry = cmd.args[1];
-                let large_arc = cmd.args[3];
-
-                // Only simplify circular arcs (rx ≈ ry), skip large-arc (sagitta undefined)
-                if (rx - ry).abs() < error && large_arc != 1.0 && rx > 0.0 {
-                    let dx = cmd.args[5];
-                    let dy = cmd.args[6];
-                    let chord = (dx * dx + dy * dy).sqrt();
-
-                    // Skip if chord > diameter (invalid arc)
-                    if chord <= rx * 2.0 {
-                        let sagitta = rx - (rx * rx - 0.25 * chord * chord).max(0.0).sqrt();
-
-                        // Try progressively lower precision
-                        for p in (0..precision).rev() {
-                            let factor = 10f64.powi(p as i32);
-                            let rounded = (rx * factor).round() / factor;
-                            if rounded <= 0.0 || chord > rounded * 2.0 {
-                                break;
-                            }
-                            let new_sagitta = rounded
-                                - (rounded * rounded - 0.25 * chord * chord).max(0.0).sqrt();
-                            if (sagitta - new_sagitta).abs() < error {
-                                cmd.args[0] = rounded;
-                                cmd.args[1] = rounded;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            cmd
-        })
-        .collect()
-}
-
-fn merge_consecutive(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
-    if commands.is_empty() {
-        return commands;
-    }
-
-    let mut result: Vec<PathCmd> = Vec::with_capacity(commands.len());
-
-    for cmd in commands {
-        if let Some(prev) = result.last_mut() {
-            // Merge consecutive h commands
-            if cmd.cmd == 'h' && prev.cmd == 'h' {
-                prev.args[0] += cmd.args[0];
-                continue;
-            }
-            if cmd.cmd == 'H' && prev.cmd == 'H' {
-                // Absolute H: just keep the last one (it overwrites)
-                prev.args[0] = cmd.args[0];
-                continue;
-            }
-            // Merge consecutive v commands
-            if cmd.cmd == 'v' && prev.cmd == 'v' {
-                prev.args[0] += cmd.args[0];
-                continue;
-            }
-            if cmd.cmd == 'V' && prev.cmd == 'V' {
-                prev.args[0] = cmd.args[0];
-                continue;
-            }
-            // Note: do NOT merge consecutive l commands — they represent distinct
-            // line segments to different waypoints. Merging skips waypoints.
+    for mut cmd in commands {
+        if matches!(cmd.cmd, 'A' | 'a') && cmd.args.len() >= 7 {
+            // The sagitta needs the chord *vector*; for an absolute `A` the
+            // end point must be taken relative to the current point (SVGO's
+            // calculateSagitta only ever sees relative data).
+            let (dx, dy) = if cmd.cmd == 'A' {
+                (cmd.args[5] - cx, cmd.args[6] - cy)
+            } else {
+                (cmd.args[5], cmd.args[6])
+            };
+            round_arc_radius(&mut cmd, dx, dy, precision, error);
         }
+        advance_point(&cmd, &mut cx, &mut cy, &mut sx, &mut sy);
         result.push(cmd);
     }
+    result
+}
 
-    // Remove zero-length h/v that may result from merging
-    result.retain(|cmd| {
-        if (cmd.cmd == 'h' || cmd.cmd == 'v') && approx_eq(cmd.args[0], 0.0, precision) {
-            return false;
+/// Round a circular arc's radius to the lowest precision whose sagitta stays
+/// within `error` of the original (SVGO smartArcRounding). `(dx, dy)` is the
+/// chord vector from the arc's start point to its end point.
+fn round_arc_radius(cmd: &mut PathCmd, dx: f64, dy: f64, precision: u32, error: f64) {
+    let rx = cmd.args[0];
+    let ry = cmd.args[1];
+    let large_arc = cmd.args[3];
+
+    // Only simplify circular arcs (rx ≈ ry), skip large-arc (sagitta undefined)
+    if (rx - ry).abs() >= error || large_arc == 1.0 || rx <= 0.0 {
+        return;
+    }
+    let chord = (dx * dx + dy * dy).sqrt();
+    // Skip if chord > diameter (invalid arc)
+    if chord > rx * 2.0 {
+        return;
+    }
+    let sagitta = rx - (rx * rx - 0.25 * chord * chord).max(0.0).sqrt();
+
+    // Try progressively lower precision
+    for p in (0..precision).rev() {
+        let factor = 10f64.powi(p as i32);
+        let rounded = (rx * factor).round() / factor;
+        if rounded <= 0.0 || chord > rounded * 2.0 {
+            break;
         }
-        true
-    });
+        let new_sagitta = rounded - (rounded * rounded - 0.25 * chord * chord).max(0.0).sqrt();
+        if (sagitta - new_sagitta).abs() < error {
+            cmd.args[0] = rounded;
+            cmd.args[1] = rounded;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Advance the current point `(cx, cy)` (and subpath start `(sx, sy)`) past
+/// `cmd`, which may be absolute or relative.
+fn advance_point(cmd: &PathCmd, cx: &mut f64, cy: &mut f64, sx: &mut f64, sy: &mut f64) {
+    let a = &cmd.args;
+    match cmd.cmd {
+        'M' => {
+            *cx = a[0];
+            *cy = a[1];
+            *sx = *cx;
+            *sy = *cy;
+        }
+        'm' => {
+            *cx += a[0];
+            *cy += a[1];
+            *sx = *cx;
+            *sy = *cy;
+        }
+        'L' | 'T' => {
+            *cx = a[0];
+            *cy = a[1];
+        }
+        'l' | 't' => {
+            *cx += a[0];
+            *cy += a[1];
+        }
+        'H' => *cx = a[0],
+        'h' => *cx += a[0],
+        'V' => *cy = a[0],
+        'v' => *cy += a[0],
+        'C' => {
+            *cx = a[4];
+            *cy = a[5];
+        }
+        'c' => {
+            *cx += a[4];
+            *cy += a[5];
+        }
+        'S' | 'Q' => {
+            *cx = a[2];
+            *cy = a[3];
+        }
+        's' | 'q' => {
+            *cx += a[2];
+            *cy += a[3];
+        }
+        'A' => {
+            *cx = a[5];
+            *cy = a[6];
+        }
+        'a' => {
+            *cx += a[5];
+            *cy += a[6];
+        }
+        'Z' | 'z' => {
+            *cx = *sx;
+            *cy = *sy;
+        }
+        _ => {}
+    }
+}
+
+/// Merge a horizontal (or vertical) absolute `L` into the previous `L` when
+/// both lie on the same axis line and point the same way — the `h+h→h` /
+/// `v+v→v` collapse of SVGO's collapseRepeated. Opposite directions are
+/// kept: `h30h-30` is a visible stroked line drawn there and back, not
+/// nothing. Other commands are never merged (consecutive `l` segments go
+/// to distinct waypoints).
+fn merge_collinear_lines(commands: Vec<PathCmd>) -> Vec<PathCmd> {
+    let mut result: Vec<PathCmd> = Vec::with_capacity(commands.len());
+    let (mut cx, mut cy) = (0.0f64, 0.0f64); // current point
+    let (mut sx, mut sy) = (0.0f64, 0.0f64); // subpath start
+    // Start point of the last pushed command when it is an `L`.
+    let mut line_from: Option<(f64, f64)> = None;
+
+    for cmd in commands {
+        match cmd.cmd {
+            'L' => {
+                let (x, y) = (cmd.args[0], cmd.args[1]);
+                if let Some((fx, fy)) = line_from {
+                    let same_sign = |a: f64, b: f64| (a >= 0.0) == (b >= 0.0);
+                    let horizontal = fy == cy && cy == y && same_sign(cx - fx, x - cx);
+                    let vertical = fx == cx && cx == x && same_sign(cy - fy, y - cy);
+                    if (horizontal || vertical)
+                        && let Some(prev) = result.last_mut()
+                    {
+                        prev.args = vec![x, y];
+                        cx = x;
+                        cy = y;
+                        continue;
+                    }
+                }
+                line_from = Some((cx, cy));
+                cx = x;
+                cy = y;
+                result.push(cmd);
+            }
+            'M' => {
+                cx = cmd.args[0];
+                cy = cmd.args[1];
+                sx = cx;
+                sy = cy;
+                line_from = None;
+                result.push(cmd);
+            }
+            'Z' | 'z' => {
+                cx = sx;
+                cy = sy;
+                line_from = None;
+                result.push(cmd);
+            }
+            _ => {
+                if cmd.args.len() >= 2 {
+                    cx = cmd.args[cmd.args.len() - 2];
+                    cy = cmd.args[cmd.args.len() - 1];
+                }
+                line_from = None;
+                result.push(cmd);
+            }
+        }
+    }
 
     result
 }
@@ -1509,25 +1694,9 @@ fn needs_separator_before(out: &str, next: &str) -> bool {
 }
 
 fn round_and_format(val: f64, precision: u32) -> String {
-    let factor = 10f64.powi(precision as i32);
-    let rounded = (val * factor).round() / factor;
-    if !rounded.is_finite() {
-        // `val * factor` overflowed (huge coordinate at high precision);
-        // fall back to the unrounded value rather than printing `inf`.
-        return format_num(val);
-    }
-
-    // "strongRound": try precision-1 and use it if error is acceptable
-    if precision > 0 {
-        let error = 10f64.powi(-(precision as i32));
-        let factor_low = 10f64.powi((precision - 1) as i32);
-        let rounded_low = (val * factor_low).round() / factor_low;
-        if (rounded - rounded_low).abs() < error {
-            return format_num(rounded_low);
-        }
-    }
-
-    format_num(rounded)
+    // strongRound; a value whose `val * 10^precision` overflows comes back
+    // unrounded rather than as `inf`.
+    format_num(strong_round(val, precision))
 }
 
 fn format_num(val: f64) -> String {
@@ -2087,13 +2256,186 @@ mod tests {
         let cmds = parse_path("M1 1M50 50L20 20").unwrap();
         let out = serialize_path(&cmds, 3);
         assert!(out.starts_with("M1 1M50 50"), "{out}");
+        // The leading `m` is absolute per spec and is parsed as `M`.
         let cmds = parse_path("m1 1m50 50l20 20").unwrap();
         let out = serialize_path(&cmds, 3);
-        assert!(out.starts_with("m1 1m50 50"), "{out}");
+        assert!(out.starts_with("M1 1m50 50"), "{out}");
         // Round trip: re-parsing the output yields the same command sequence.
         let reparsed = parse_path(&out).unwrap();
         assert_eq!(reparsed.len(), 3);
         assert_eq!(reparsed[1].cmd, 'm');
+    }
+
+    #[test]
+    fn leading_relative_moveto_is_parsed_as_absolute() {
+        // SVGO path2js: the first moveto is absolute even when written `m`.
+        let cmds = parse_path("m5 5 10 0 0 10z").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mllz");
+        let cmds = parse_path_strict("m5 5h10zm20 0h5z").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mhzmhz");
+        // Later `m` subpaths stay relative; the serialized form is unchanged.
+        assert_eq!(serialize_path(&cmds, 3), "M5 5h10zm20 0h5z");
+    }
+
+    #[test]
+    fn strong_round_compares_candidate_with_original() {
+        // SVGO strongRound: drop a decimal only when that loses < 10^-p
+        // against the *original* value.
+        for (v, expected) in [
+            (5.0009, "5"),
+            (1.0014, "1.001"),
+            (1.00149, "1.001"),
+            (7.0006, "7"),
+            (3.0014, "3.001"),
+            (5.0005, "5"),
+            (2.3491, "2.35"),
+            (18.079, "18.079"),
+            (-18.079, "-18.079"),
+            (-0.1505, "-.15"),
+        ] {
+            assert_eq!(round_and_format(v, 3), expected, "{v}");
+        }
+        assert_eq!(round_and_format(1.96545901, 8), "1.96545901");
+        assert_eq!(round_and_format(5.01352941, 8), "5.01352941");
+        assert_eq!(round_and_format(1.5, 0), "2");
+        // SVGO convertPathData.14 row 1: the kappa circle quadrant's radius
+        // comes out as 5.0005 and must print as 5 for the arc to be worth it.
+        assert_eq!(
+            optimize_path("M0 0c2.761 0 5 2.239 5 5", 3).unwrap(),
+            "M0 0A5 5 0 0 1 5 5"
+        );
+    }
+
+    #[test]
+    fn arc_radius_rounding_uses_relative_chord() {
+        // Absolute `A`: the chord is end - current point, not the raw end
+        // point. Rounding 50.4 -> 50 would change the sagitta by 0.06.
+        let out = optimize_path("M-50 0A50.4 50.4 0 0 1 .5 .5", 3).unwrap();
+        assert!(out.contains("50.4 50.4"), "{out}");
+        // SVGO convertPathData.15 at precision 2 keeps 6.44.
+        let out = optimize_path("M.05 6.45A6.44 6.44 0 0 1 6.48 .02", 2).unwrap();
+        assert!(out.contains("6.44 6.44"), "{out}");
+        // SVGO convertPathData.33: with the right (unit) chord the radius
+        // rounds all the way to 11 (SVGO: `M1 1a11 11 0 0 0 1 0`).
+        let out = optimize_path("m 1 1 a 10.567 10.567 0 0 0 1 0", 3).unwrap();
+        assert!(out.contains("11 11 0 0 0"), "{out}");
+        assert!(!out.contains("10.6"), "{out}");
+        // A relative `a` is unaffected.
+        let out = optimize_path("M100 100a100.4 100.4 0 0 1 1 .5", 3).unwrap();
+        assert!(out.contains("a100 100"), "{out}");
+    }
+
+    #[test]
+    fn straight_curve_detection_uses_perpendicular_distance() {
+        // A cubic that ends where it starts has no chord: never flattened
+        // (the old cross-product test saw 0 and erased the whole loop).
+        let out = optimize_path("M5 5C9 1 9 9 5 5", 3).unwrap();
+        assert!(out.contains('c') || out.contains('C'), "{out}");
+        let out = optimize_path("M5 5C9 1 9 9 5.0001 5", 3).unwrap();
+        assert!(out.contains('c') || out.contains('C'), "{out}");
+        // Short chord, visible bulge (~0.07 units): stays a curve (SVGO:
+        // `M0 0q.15-.15.002.002`).
+        let out = optimize_path("M0 0C.1-.1 .1-.1 .002 .002", 3).unwrap();
+        assert_eq!(out, "M0 0Q.15-.15.002.002");
+        // SVGO convertPathData.17 at precision 8: a long near-straight curve
+        // (control point 7e-9 off the chord) becomes a line.
+        let out = optimize_path(
+            "M33.027833,1.96545901 C33.097408,2.03503401 38.0413624,6.97898843 38.0413624,6.97898842",
+            8,
+        )
+        .unwrap();
+        assert_eq!(out, "M33.027833 1.96545901l5.0135294 5.01352941");
+        // Genuinely straight control points still collapse at p=3.
+        assert_eq!(optimize_path("M0 0C1 1 2 2 3 3", 3).unwrap(), "M0 0 3 3");
+        // A curve that never leaves the current point draws nothing and is
+        // dropped (SVGO removeUseless), unlike a loop that ends at its start.
+        assert_eq!(
+            optimize_path("M10 10C10 10 10 10 10 10", 3).unwrap(),
+            "M10 10"
+        );
+        assert_eq!(optimize_path("M10 10Q10 10 10 10", 3).unwrap(), "M10 10");
+        assert_eq!(
+            optimize_path("M0 0L5 5C5 5 5 5 5 5L10 0", 3).unwrap(),
+            "M0 0 5 5 10 0"
+        );
+    }
+
+    #[test]
+    fn opposite_direction_lines_are_not_merged_away() {
+        // SVGO convertPathData.12: h/h and v/v collapse only when
+        // they point the same way; a stroked back-and-forth line must stay.
+        // (SVGO additionally rewrites a line back to the start as `z`.)
+        for (input, expected) in [
+            ("M10 50h30h-30", "M10 50h30H10"),
+            ("M10 50h-30h30", "M10 50h-30 30"),
+            ("M10 50h-30h-50", "M10 50h-80"),
+            ("M10 50h30h50", "M10 50h80"),
+            ("M10 50v30v-30", "M10 50v30V50"),
+            ("M10 50v-30v30", "M10 50V20v30"),
+            ("M10 50v-30v-50", "M10 50v-80"),
+            ("M10 50v30v50", "M10 50v80"),
+            ("M10 50L10 80L10 0", "M10 50v30V0"),
+            ("M10 50L10 10L10 80", "M10 50V10v70"),
+            ("M10 50L80 50L0 50", "M10 50h70H0"),
+            ("M10 50L0 50L80 50", "M10 50H0h80"),
+            // SVGO convertPathData.28 (SVGO additionally emits the last
+            // segment as `z`): the V/v pair must survive.
+            ("M6 32.845 6 14.766 6 32.845", "M6 32.845V14.766v18.079"),
+        ] {
+            let out = optimize_path(input, 3).unwrap_or_else(|| input.to_string());
+            assert_eq!(out, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn moveto_before_moveto_is_dropped() {
+        // SVGO collapses `m`+`m`: only the last moveto positions the pen.
+        assert_eq!(
+            optimize_path("M1 1M50 50L20 20L20 50z", 3).unwrap(),
+            "M50 50 20 20v30z"
+        );
+        let out = optimize_path("M10 10 M20 20 L30 30", 3).unwrap();
+        assert!(!out.contains("M10 10 20 20"), "{out}");
+        assert_eq!(out, "M20 20 30 30");
+        // A merged path with stacked movetos (mergePaths output).
+        let out = optimize_path("M 50 50 M1.25.75 M 50 50 20 20", 3).unwrap();
+        assert_eq!(out, "M50 50 20 20");
+        let reparsed = parse_path(&out).unwrap();
+        assert_eq!(reparsed.iter().map(|c| c.cmd).collect::<String>(), "ML");
+        // SVGO convertPathData.12, last row (SVGO: `M10 50H0m30-40L10 80`;
+        // svgm prefers the absolute form on equal length).
+        assert_eq!(
+            optimize_path("M10 50L0 50M80 50M30 10L10 80", 3).unwrap(),
+            "M10 50H0M30 10 10 80"
+        );
+    }
+
+    #[test]
+    fn moveto_before_moveto_kept_with_markers() {
+        // marker-start / marker-mid place a glyph at every vertex, so a
+        // moveto that draws nothing still matters. Attribute, style
+        // attribute, inherited and stylesheet forms are all honoured.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-mid=\"url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"marker-start:url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g marker-start=\"url(#m)\"><path d=\"M1 1M50 50L20 20L20 50z\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{path{marker-mid:url(#m)}}</style><path d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+        ] {
+            let mut doc = parse_svg(input).unwrap();
+            ConvertPathData::default().run(&mut doc);
+            let out = serialize(&doc);
+            assert!(out.contains("M1 1M50 50"), "{out}");
+        }
+        // marker-end does not involve the leading vertex; `none` is no marker.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-end=\"url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-mid=\"none\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+        ] {
+            let mut doc = parse_svg(input).unwrap();
+            ConvertPathData::default().run(&mut doc);
+            let out = serialize(&doc);
+            assert!(out.contains("d=\"M50 50 20 20v30z\""), "{out}");
+        }
     }
 
     #[test]
