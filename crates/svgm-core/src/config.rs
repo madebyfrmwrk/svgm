@@ -87,7 +87,11 @@ fn create_pass(name: &str, precision: u32) -> Box<dyn Pass> {
         "removeDoctype" => Box::new(passes::remove_doctype::RemoveDoctype),
         "removeProcInst" => Box::new(passes::remove_proc_inst::RemoveProcInst),
         "removeComments" => Box::new(passes::remove_comments::RemoveComments),
-        "removeDeprecatedAttrs" => Box::new(passes::remove_deprecated_attrs::RemoveDeprecatedAttrs),
+        "removeDeprecatedAttrs" => {
+            Box::new(passes::remove_deprecated_attrs::RemoveDeprecatedAttrs {
+                remove_unsafe: false,
+            })
+        }
         "removeMetadata" => Box::new(passes::remove_metadata::RemoveMetadata),
         "removeEditorData" => Box::new(passes::remove_editor_data::RemoveEditorData),
         "removeDesc" => Box::new(passes::remove_desc::RemoveDesc),

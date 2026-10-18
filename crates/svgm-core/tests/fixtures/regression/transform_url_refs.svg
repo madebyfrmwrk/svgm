@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 200 200">
+  <defs>
+    <clipPath id="clip" clipPathUnits="userSpaceOnUse">
+      <rect width="10" height="10"/>
+    </clipPath>
+    <linearGradient id="grad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="10" y2="0">
+      <stop offset="0" stop-color="red"/>
+      <stop offset="1" stop-color="blue"/>
+    </linearGradient>
+    <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="10" height="10">
+      <rect width="10" height="10" fill="white"/>
+    </mask>
+  </defs>
+  <!-- translate baked into a clipped path would move it out of the clip -->
+  <path clip-path="url(#clip)" transform="translate(100,100)" d="M0 0h10v10H0z"/>
+  <!-- userSpaceOnUse gradient: baking the translate changes the fill -->
+  <rect fill="url(#grad)" transform="translate(100,20)" width="10" height="10"/>
+  <!-- style-form reference -->
+  <rect style="mask:url(#m)" transform="translate(20,100)" width="10" height="10"/>
+  <!-- positioned tspan: moving the <text> x/y alone would not move the tspan -->
+  <text transform="translate(50,50)"><tspan x="0" y="10">a</tspan></text>
+  <!-- instanced by <use>: the instance must not inherit the baked offset -->
+  <path id="p" transform="translate(5,5)" d="M0 0h10v10H0z"/>
+  <use xlink:href="#p" x="100"/>
+  <!-- group transform must not be pushed into a non-rendered resource -->
+  <g transform="scale(2)"><clipPath id="c2"><rect width="10" height="10"/></clipPath></g>
+  <rect width="100" height="100" clip-path="url(#c2)"/>
+</svg>

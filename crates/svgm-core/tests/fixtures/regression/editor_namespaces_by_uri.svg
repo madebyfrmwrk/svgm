@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:x="http://www.w3.org/1999/xlink"
+     xmlns:a="http://example.com/custom"
+     xmlns:ink="http://www.inkscape.org/namespaces/inkscape"
+     xmlns:sp="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+     xmlns:serif="http://www.serif.com/"
+     xmlns:bx="https://boxy-svg.com"
+     xmlns:v="http://schemas.microsoft.com/visio/2003/SVGExtensions/"
+     ink:version="1.2 (dc2aeda, 2022-05-15)" width="20" height="20" viewBox="0 0 20 20">
+  <sp:namedview id="base" ink:zoom="1" ink:current-layer="layer1"/>
+  <v:documentProperties v:langID="1033"/>
+  <bx:grid x="0" y="0"/>
+  <defs>
+    <linearGradient id="h" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="red"/>
+      <stop offset="1" stop-color="blue"/>
+    </linearGradient>
+    <linearGradient id="g" x:href="#h"/>
+  </defs>
+  <g ink:groupmode="layer" ink:label="Layer 1" id="layer1">
+    <rect id="r" serif:id="Shape" a:role="keep" ink:label="bg" sp:nodetypes="cccc" width="20" height="20" fill="url(#g)"/>
+    <use x:href="#r" x="2" y="2" width="4" height="4"/>
+  </g>
+</svg>

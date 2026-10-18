@@ -35,7 +35,7 @@ pub(crate) const URL_REF_ATTRS: &[&str] = &[
 /// Elements that can safely receive a `transform` attribute.
 pub(crate) const MOVEABLE_ELEMENTS: &[&str] = &[
     "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "text", "use",
-    "image", "svg",
+    "image", "svg", "a", "switch",
 ];
 
 /// Inheritable presentation attributes (matches SVGO's `inheritableAttrs`
@@ -390,14 +390,35 @@ fn unescape_css_ident(s: &str) -> String {
     out
 }
 
+/// At-rules whose block holds declarations (or keyframe blocks), not rules;
+/// `[` inside them is never an attribute selector. Any other at-rule
+/// (`@media`, `@supports`, `@layer`, `@container`, unknown ones ...) is
+/// treated as a conditional group whose body holds more rules.
+const DECLARATION_AT_RULES: &[&str] = &[
+    "font-face",
+    "page",
+    "keyframes",
+    "counter-style",
+    "property",
+    "font-feature-values",
+    "font-palette-values",
+    "color-profile",
+    "view-transition",
+];
+
 /// Attribute names used in attribute selectors (`[fill=black]`,
 /// `text[xml\:space]`) across all `<style>` elements. Only `[` in selector
-/// position counts: outside `{}` blocks and outside string literals.
+/// position counts: outside declaration blocks (but inside conditional group
+/// rules such as `@media { ... }`) and outside string literals.
 pub(crate) fn attributes_in_stylesheets(doc: &Document) -> HashSet<String> {
     let css = strip_css_comments(&stylesheet_text(doc));
     let mut out = HashSet::new();
     let chars: Vec<char> = css.chars().collect();
-    let mut depth = 0usize;
+    // One entry per open `{`: true when the block's body holds rules (so
+    // selectors may appear), false for a declaration block.
+    let mut blocks: Vec<bool> = Vec::new();
+    // Start of the current prelude (selector or at-rule text).
+    let mut prelude_start = 0usize;
     let mut quote: Option<char> = None;
     let mut i = 0;
     while i < chars.len() {
@@ -413,11 +434,41 @@ pub(crate) fn attributes_in_stylesheets(doc: &Document) -> HashSet<String> {
             i += 1;
             continue;
         }
+        let in_rule_position = blocks.last().copied().unwrap_or(true);
         match c {
             '"' | '\'' => quote = Some(c),
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            '[' if depth == 0 => {
+            '{' => {
+                let prelude: String = chars[prelude_start..i].iter().collect();
+                let holds_rules = in_rule_position
+                    && match prelude.trim_start().strip_prefix('@') {
+                        Some(at_rule) => {
+                            let name: String = at_rule
+                                .chars()
+                                .take_while(|&ch| is_css_ident_char(ch))
+                                .collect();
+                            // Vendor prefixes: @-webkit-keyframes
+                            let name = name.trim_start_matches('-');
+                            let name = name
+                                .split_once('-')
+                                .filter(|(vendor, _)| {
+                                    matches!(*vendor, "webkit" | "moz" | "ms" | "o")
+                                })
+                                .map_or(name, |(_, rest)| rest);
+                            !DECLARATION_AT_RULES.contains(&name)
+                        }
+                        // A style rule: its block holds declarations.
+                        None => false,
+                    };
+                blocks.push(holds_rules);
+                prelude_start = i + 1;
+            }
+            '}' => {
+                blocks.pop();
+                prelude_start = i + 1;
+            }
+            // Ends a statement at-rule such as `@import url(x);`.
+            ';' => prelude_start = i + 1,
+            '[' if in_rule_position => {
                 let mut j = i + 1;
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
@@ -549,8 +600,14 @@ pub(crate) fn split_property(decl: &str) -> Option<(&str, &str)> {
 fn strip_important(value: &str) -> &str {
     let v = value.trim();
     const KW: &str = "important";
-    if v.len() >= KW.len() && v[v.len() - KW.len()..].eq_ignore_ascii_case(KW) {
-        let before = v[..v.len() - KW.len()].trim_end();
+    // Compare on bytes: `v.len() - KW.len()` need not be a char boundary when
+    // the value ends in a multi-byte character, and slicing there would panic.
+    let cut = v.len().wrapping_sub(KW.len());
+    if v.len() >= KW.len()
+        && v.is_char_boundary(cut)
+        && v.as_bytes()[cut..].eq_ignore_ascii_case(KW.as_bytes())
+    {
+        let before = v[..cut].trim_end();
         if let Some(rest) = before.strip_suffix('!') {
             return rest.trim();
         }
@@ -637,6 +694,84 @@ pub(crate) fn computed_style_with(
 /// and any non-ASCII code point (CSS Syntax Level 3).
 pub(crate) fn is_css_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()
+}
+
+// ---------------------------------------------------------------------------
+// Group / transform safety
+// ---------------------------------------------------------------------------
+
+/// Properties whose semantics differ on a `<g>` and on a single element:
+/// clip-path/mask/filter on a group apply to the composited result of all
+/// children (in the group's own coordinate system), which is not the same
+/// as applying them to a child individually or after a transform.
+pub(crate) const GROUP_ONLY_ATTRS: &[&str] = &["clip-path", "mask", "filter"];
+
+/// True when the element carries any [`GROUP_ONLY_ATTRS`] property, either
+/// as a presentation attribute or as a `style` declaration (an empty
+/// declaration such as `style="filter:"` counts: SVGO's `computeStyle`
+/// treats the property as present, and "unknown" must mean "unsafe").
+pub(crate) fn has_group_only_prop(elem: &Element) -> bool {
+    GROUP_ONLY_ATTRS
+        .iter()
+        .any(|&p| elem.attr(p).is_some() || style_declaration(elem, p).is_some())
+}
+
+/// True when any [`URL_REF_ATTRS`] value or the `style` attribute contains
+/// a `url(` reference (SVGO's `referencesProps` + `includesUrlReference`).
+/// Moving such an element into a different coordinate space can change
+/// what the referenced gradient/clip/mask/marker/filter renders.
+pub(crate) fn has_url_reference(elem: &Element) -> bool {
+    elem.attributes.iter().any(|a| {
+        a.prefix.is_none()
+            && (a.name == "style" || URL_REF_ATTRS.contains(&a.name.as_str()))
+            && a.value.contains("url(")
+    })
+}
+
+/// True when the element is an unprefixed SMIL animation element.
+pub(crate) fn is_animation_element(elem: &Element) -> bool {
+    elem.prefix.is_none() && ANIMATION_ELEMS.contains(&elem.name.as_str())
+}
+
+/// True when any direct child of `id` is an animation element. Animation
+/// children "add" attributes to their parent, so such a parent cannot be
+/// unwrapped or have its attributes moved (SVGO `collapseGroups`).
+pub(crate) fn has_animation_child(doc: &Document, id: NodeId) -> bool {
+    doc.children(id)
+        .any(|c| elem(doc, c).is_some_and(is_animation_element))
+}
+
+/// All descendants of `id` (depth-first, excluding `id` itself), skipping
+/// removed nodes.
+pub(crate) fn descendants(doc: &Document, id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeId> = doc.children(id).collect();
+    stack.reverse();
+    while let Some(n) = stack.pop() {
+        out.push(n);
+        let mut kids: Vec<NodeId> = doc.children(n).collect();
+        kids.reverse();
+        stack.extend(kids);
+    }
+    out
+}
+
+/// SVGO's recursive `hasAnimatedAttr`: true when `id` itself or any
+/// descendant is an animation element whose `attributeName` is `attr_name`.
+/// [`has_animated_attr`] only looks at direct children.
+pub(crate) fn has_animated_attr_deep(doc: &Document, id: NodeId, attr_name: &str) -> bool {
+    std::iter::once(id).chain(descendants(doc, id)).any(|n| {
+        elem(doc, n)
+            .is_some_and(|e| is_animation_element(e) && e.attr("attributeName") == Some(attr_name))
+    })
+}
+
+/// True when the concatenated `<style>` text contains `needle`. A cheap,
+/// conservative stand-in for "does any CSS rule set this property": the
+/// caller must still check that the element can match a selector (has a
+/// `class` or `id`).
+pub(crate) fn stylesheet_contains(doc: &Document, needle: &str) -> bool {
+    stylesheet_text(doc).contains(needle)
 }
 
 #[cfg(test)]
@@ -920,6 +1055,41 @@ mod tests {
     }
 
     #[test]
+    fn attributes_in_stylesheets_sees_through_conditional_at_rules() {
+        let attrs = |css: &str| {
+            let svg =
+                format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><style>{css}</style></svg>"#);
+            attributes_in_stylesheets(&parse(&svg).unwrap())
+        };
+        let set =
+            |items: &[&str]| -> HashSet<String> { items.iter().map(|s| s.to_string()).collect() };
+        // Conditional group rules hold more rules.
+        assert_eq!(attrs("@media (max-width:1px){[fill]{}}"), set(&["fill"]));
+        assert_eq!(
+            attrs(r"@supports (x:y){@media print{text[xml\:space]{stroke:red}}}[a]{}"),
+            set(&["xml:space", "a"])
+        );
+        assert_eq!(
+            attrs("@layer base{[b]{}} @unknown x{[c]{}}"),
+            set(&["b", "c"])
+        );
+        // Statement at-rules end at `;`.
+        assert_eq!(attrs("@import url(x);@charset 'u';[z]{}"), set(&["z"]));
+        // Declaration at-rules and declaration blocks never hold selectors.
+        assert_eq!(
+            attrs("@font-face{src:url([x])} a{grid-template-columns:[full-start] 1fr}"),
+            set(&[])
+        );
+        assert_eq!(
+            attrs("@keyframes k{from{opacity:[x]}} @-webkit-keyframes j{to{[y]:1}} b[y]{}"),
+            set(&["y"])
+        );
+        // Unbalanced braces do not panic or leak.
+        assert_eq!(attrs("a{}}}[b]{}"), set(&["b"]));
+        assert_eq!(attrs("@media x{a{"), set(&[]));
+    }
+
+    #[test]
     fn attributes_in_stylesheets_merges_style_elements_and_cdata() {
         let doc = parse(
             r#"<svg xmlns="http://www.w3.org/2000/svg"><style>[a]{}</style><style><![CDATA[[b]{}]]></style></svg>"#,
@@ -953,6 +1123,25 @@ mod tests {
         assert_eq!(strip_important("red !important"), "red");
         assert_eq!(strip_important("red ! IMPORTANT "), "red");
         assert_eq!(strip_important("red!important"), "red");
+        assert_eq!(strip_important("important"), "important");
+    }
+
+    #[test]
+    fn strip_important_never_slices_inside_a_char() {
+        // A value whose last 9 bytes start mid-character used to panic.
+        for v in [
+            "fill:ǎǎǎǎǎ",
+            "ǎǎǎǎǎ",
+            "€€€€",
+            "red !importanǎ",
+            "ǎ!important",
+            "x",
+        ] {
+            let _ = strip_important(v);
+        }
+        assert_eq!(strip_important("red !important"), "red");
+        assert_eq!(strip_important("red ! IMPORTANT "), "red");
+        assert_eq!(strip_important("ǎ !important"), "ǎ");
         assert_eq!(strip_important("important"), "important");
     }
 }

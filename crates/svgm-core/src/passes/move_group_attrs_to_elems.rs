@@ -1,4 +1,7 @@
-use super::{MOVEABLE_ELEMENTS, Pass, PassResult, URL_REF_ATTRS, has_structural_css};
+use super::{
+    MOVEABLE_ELEMENTS, Pass, PassResult, has_animated_attr_deep, has_animation_child,
+    has_group_only_prop, has_structural_css, has_url_reference, style_declaration,
+};
 use crate::ast::{Document, NodeId, NodeKind};
 
 /// Moves a group's `transform` attribute down to its children when safe.
@@ -55,6 +58,19 @@ impl Pass for MoveGroupAttrsToElems {
                 continue;
             }
 
+            // clip-path/mask/filter (attribute or style) apply in the group's
+            // own coordinate system; a CSS transform overrides the attribute.
+            if has_group_only_prop(group_elem)
+                || style_declaration(group_elem, "transform").is_some()
+            {
+                continue;
+            }
+
+            // Animation children "add" attributes to the group.
+            if has_animation_child(doc, id) {
+                continue;
+            }
+
             // Get element children
             let children: Vec<NodeId> = doc.children(id).collect();
             let elem_children: Vec<NodeId> = children
@@ -76,27 +92,20 @@ impl Pass for MoveGroupAttrsToElems {
                 continue;
             }
 
-            // Check no child has url() references that would break with transform change
-            let has_url_refs = elem_children.iter().any(|&c| {
-                if let NodeKind::Element(ref e) = doc.node(c).kind {
-                    e.attributes.iter().any(|a| {
-                        a.prefix.is_none()
-                            && URL_REF_ATTRS.contains(&a.name.as_str())
-                            && a.value.contains("url(")
-                    })
-                } else {
-                    false
-                }
+            // Check no child has url() references (attribute or style) that
+            // would break with a transform change, no child has an id (may be
+            // referenced from elsewhere), no child has a CSS transform, and
+            // no child subtree animates transform.
+            let unsafe_child = elem_children.iter().any(|&c| {
+                let NodeKind::Element(ref e) = doc.node(c).kind else {
+                    return true;
+                };
+                has_url_reference(e)
+                    || e.attr("id").is_some()
+                    || style_declaration(e, "transform").is_some()
+                    || has_animated_attr_deep(doc, c, "transform")
             });
-            if has_url_refs {
-                continue;
-            }
-
-            // Check no child has id (may be referenced from elsewhere)
-            let has_id = elem_children.iter().any(
-                |&c| matches!(&doc.node(c).kind, NodeKind::Element(e) if e.attr("id").is_some()),
-            );
-            if has_id {
+            if unsafe_child {
                 continue;
             }
 
@@ -176,7 +185,7 @@ mod tests {
 
     #[test]
     fn skips_when_child_has_url_ref() {
-        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0" fill="url(#grad)"/><rect width="5" height="5"/></g></svg>"#;
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0" fill="url(#grad)"/><rect width="5" height="5"/></g></svg>"##;
         let mut doc = parse(input).unwrap();
         assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
     }
@@ -207,5 +216,48 @@ mod tests {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0"/></g></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn skips_when_child_has_style_url_ref() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0" style="fill:url(#grad)"/><rect width="5" height="5"/></g></svg>"##;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn skips_when_child_has_css_transform() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0" style="transform:rotate(45deg)"/><rect width="5" height="5"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn skips_when_child_subtree_animates_transform() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><path d="M0 0"><animateTransform attributeName="transform" type="rotate" values="0;360" dur="1s"/></path><rect width="5" height="5"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn skips_when_group_has_animation_child() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><set attributeName="opacity" to="0"/><path d="M0 0"/><rect width="5" height="5"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn moves_transform_onto_anchor_children() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(10,20)"><a href="#x"><path d="M0 0"/></a><a href="#y"><rect width="5" height="5"/></a></g></svg>"##;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert_eq!(output.matches(r##"<a href="#"##).count(), 2);
+        assert_eq!(
+            output.matches(r#"transform="translate(10,20)""#).count(),
+            2,
+            "{output}"
+        );
+        assert!(!output.contains("<g transform"), "{output}");
     }
 }

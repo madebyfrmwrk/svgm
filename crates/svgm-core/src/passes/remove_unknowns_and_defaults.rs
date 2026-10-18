@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{INHERITABLE_PROPS, Pass, PassResult};
+use super::{INHERITABLE_PROPS, Pass, PassResult, attributes_in_stylesheets};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct RemoveUnknownsAndDefaults;
@@ -114,6 +114,10 @@ impl Pass for RemoveUnknownsAndDefaults {
     fn run(&self, doc: &mut Document) -> PassResult {
         let mut changed = false;
         let ids = doc.traverse();
+        // Attribute names used in `[attr]` selectors of a <style> sheet:
+        // removing one would un-match its rule (SVGO #2144), so they are
+        // never removed, default value or not.
+        let referenced = attributes_in_stylesheets(doc);
 
         for id in ids {
             // Phase 1: compute inherited attribute values (immutable borrow)
@@ -132,6 +136,10 @@ impl Pass for RemoveUnknownsAndDefaults {
                 elem.attributes.retain(|attr| {
                     // Only check unprefixed attributes
                     if attr.prefix.is_some() {
+                        return true;
+                    }
+
+                    if referenced.contains(&attr.name) {
                         return true;
                     }
 
@@ -368,6 +376,28 @@ mod tests {
             output.matches("fill=\"black\"").count(),
             1,
             "child fill=black should be removed as useless override: {output}"
+        );
+    }
+
+    #[test]
+    fn attribute_selectors_keep_referenced_attrs() {
+        // SVGO removeUnknownsAndDefaults.17 / removeDeprecatedAttrs.08
+        // (#2144): a `[attr]` selector in the stylesheet must keep matching.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" x=\"0\"><style>svg[version=\"1.1\"]{fill:blue}[fill=\"black\"]{stroke:blue}svg[x]{}</style><path fill=\"black\" opacity=\"1\" d=\"M0 0\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(output.contains("version=\"1.1\""), "{output}");
+        assert!(output.contains("x=\"0\""), "{output}");
+        assert!(output.contains("fill=\"black\""), "{output}");
+        assert!(!output.contains("opacity"), "{output}");
+
+        // Selectors nested in a conditional at-rule count too.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{[fill=black]{stroke:blue}}</style><path fill=\"black\" d=\"M0 0\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
         );
     }
 
