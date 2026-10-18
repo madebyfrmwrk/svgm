@@ -65,8 +65,24 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
         })?;
 
         match token {
-            xmlparser::Token::Declaration { .. } => {
-                // XML declaration like <?xml version="1.0"?> — we drop it for minification
+            xmlparser::Token::Declaration { span, .. } => {
+                // XML declaration `<?xml version="1.0"?>`, kept as a
+                // processing instruction with target `xml` so that
+                // removeProcInst owns its removal (and disabling that pass
+                // round-trips it).
+                let content = span
+                    .as_str()
+                    .strip_prefix("<?xml")
+                    .and_then(|s| s.strip_suffix("?>"))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let id = doc.alloc(NodeKind::ProcessingInstruction {
+                    target: "xml".to_string(),
+                    content,
+                });
+                let parent = *stack.last().ok_or(ParseError::UnexpectedEof)?;
+                doc.append_child(parent, id);
             }
 
             xmlparser::Token::ProcessingInstruction {
@@ -558,10 +574,13 @@ mod tests {
         // parameter and unknown entities are kept as literal text.
         assert_eq!(text, "#ff0000 #ff0000&A &unknown; &ext; &param;");
 
-        // The raw DOCTYPE round-trips when removeDoctype is disabled.
+        // The XML declaration and the raw DOCTYPE round-trip when
+        // removeProcInst / removeDoctype are disabled.
         let out = serialize(&doc);
         assert!(
-            out.starts_with("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\""),
+            out.starts_with(
+                "<?xml version=\"1.0\"?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\""
+            ),
             "{out}"
         );
         assert!(
