@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, inside_foreign_object, is_css_ident_char};
 use crate::ast::{Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -12,10 +12,19 @@ impl Pass for CleanupIds {
     fn run(&self, doc: &mut Document) -> PassResult {
         let ids = doc.traverse();
 
+        // Elements inside <foreignObject> are HTML: their ids are neither
+        // removed nor renamed (SVGO skips the subtree).
+        let foreign: HashSet<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|&id| inside_foreign_object(doc, id))
+            .collect();
+
         // Phase 1: Collect all ID declarations
         let mut declarations: HashMap<String, NodeId> = HashMap::new();
         for &id in &ids {
-            if let NodeKind::Element(ref elem) = doc.node(id).kind
+            if !foreign.contains(&id)
+                && let NodeKind::Element(ref elem) = doc.node(id).kind
                 && let Some(id_val) = elem.attr("id")
             {
                 declarations.insert(id_val.to_string(), id);
@@ -102,14 +111,16 @@ impl Pass for CleanupIds {
         let mut changed = false;
 
         for &id in &ids {
+            let is_foreign = foreign.contains(&id);
             let node = doc.node_mut(id);
             match &mut node.kind {
                 NodeKind::Element(elem) => {
                     // Remove unreferenced IDs or rename referenced ones
-                    if let Some(id_attr_pos) = elem
-                        .attributes
-                        .iter()
-                        .position(|a| a.name == "id" && a.prefix.is_none())
+                    if !is_foreign
+                        && let Some(id_attr_pos) = elem
+                            .attributes
+                            .iter()
+                            .position(|a| a.name == "id" && a.prefix.is_none())
                     {
                         let id_val = elem.attributes[id_attr_pos].value.clone();
                         if !referenced.contains(&id_val) {
@@ -222,31 +233,27 @@ fn extract_smil_refs(value: &str, known_ids: &HashSet<String>) -> Vec<String> {
     refs
 }
 
+/// Byte length of the CSS identifier starting at `from` (zero when none).
+/// Identifiers may contain any non-ASCII character (`#ǎx`).
+fn css_ident_len(text: &str, from: usize) -> usize {
+    text[from..]
+        .char_indices()
+        .find(|&(_, c)| !is_css_ident_char(c))
+        .map_or(text.len() - from, |(i, _)| i)
+}
+
 /// Extract IDs referenced as CSS selectors (#id) in <style> text.
 /// Conservative: checks against known IDs to avoid false positives with hex colors.
 fn extract_css_id_refs(text: &str, known_ids: &HashSet<String>) -> Vec<String> {
     let mut refs = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            let start = i + 1;
-            let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
-            {
-                end += 1;
-            }
-            if end > start {
-                let candidate = &text[start..end];
-                if known_ids.contains(candidate) {
-                    refs.push(candidate.to_string());
-                }
-            }
-            i = end;
-        } else {
-            i += 1;
+    let mut rest = text;
+    while let Some(hash) = rest.find('#') {
+        let start = hash + 1;
+        let end = start + css_ident_len(rest, start);
+        if end > start && known_ids.contains(&rest[start..end]) {
+            refs.push(rest[start..end].to_string());
         }
+        rest = &rest[end.max(start)..];
     }
     refs
 }
@@ -310,41 +317,26 @@ fn replace_css_ids(
     rename_map: &HashMap<String, String>,
     declared_ids: &HashSet<String>,
 ) -> String {
-    let bytes = text.as_bytes();
     let mut result = String::with_capacity(text.len());
-    let mut i = 0;
+    let mut rest = text;
 
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            let start = i + 1;
-            let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
-            {
-                end += 1;
+    while let Some(hash) = rest.find('#') {
+        result.push_str(&rest[..=hash]);
+        let start = hash + 1;
+        let end = start + css_ident_len(rest, start);
+        let candidate = &rest[start..end];
+        match rename_map.get(candidate) {
+            Some(new_name) => result.push_str(new_name),
+            // A known but unrenamed id, or not an id at all (hex colour):
+            // keep the text as-is.
+            None => {
+                let _ = declared_ids;
+                result.push_str(candidate);
             }
-            if end > start {
-                let candidate = &text[start..end];
-                if let Some(new_name) = rename_map.get(candidate) {
-                    result.push('#');
-                    result.push_str(new_name);
-                    i = end;
-                    continue;
-                } else if declared_ids.contains(candidate) {
-                    // Known ID but not renamed (already short) — keep as-is
-                    result.push_str(&text[i..end]);
-                    i = end;
-                    continue;
-                }
-            }
-            // Not a known ID — keep the # and the text as-is
-            result.push('#');
-            i = start;
-        } else {
-            result.push(text[i..].chars().next().unwrap());
-            i += text[i..].chars().next().unwrap().len_utf8();
         }
+        rest = &rest[end..];
     }
+    result.push_str(rest);
 
     result
 }
@@ -513,6 +505,37 @@ mod tests {
         assert_eq!(result, PassResult::Changed);
         assert!(output.contains("url(#a)"));
         assert!(output.contains("url(#b)"));
+    }
+
+    #[test]
+    fn shortens_non_ascii_css_id_reference() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#ǎx{opacity:.5}</style><rect id=\"ǎx\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("#a{opacity:.5}"), "{output}");
+        assert!(!output.contains("ǎx"), "{output}");
+    }
+
+    #[test]
+    fn css_id_prefix_of_longer_ident_is_not_a_reference() {
+        // `#ǎxy` is a different identifier from `#ǎx`.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#ǎxy{opacity:.5}</style><rect id=\"ǎx\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(!output.contains("id="), "{output}");
+        assert!(output.contains("#ǎxy{opacity:.5}"), "{output}");
+    }
+
+    #[test]
+    fn ids_inside_foreign_object_are_left_alone() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><clipPath id=\"clip_long\"><rect/></clipPath></defs><rect clip-path=\"url(#clip_long)\"/><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"html-unused\"><p id=\"para\">x</p></div></foreignObject></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("url(#a)"), "{output}");
+        assert!(output.contains("id=\"html-unused\""), "{output}");
+        assert!(output.contains("id=\"para\""), "{output}");
     }
 
     #[test]
