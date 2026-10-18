@@ -1,8 +1,18 @@
-use super::convert_path_data::{PathCmd, parse_path_strict};
+use super::convert_path_data::{PathCmd, parse_path_strict, serialize_path};
 use super::{Pass, PassResult};
 use crate::ast::{Document, NodeId, NodeKind};
 
-pub struct MergePaths;
+pub struct MergePaths {
+    /// Numeric precision used when re-serializing the merged `d` (SVGO
+    /// mergePaths `floatPrecision`, default 3).
+    pub precision: u32,
+}
+
+impl Default for MergePaths {
+    fn default() -> Self {
+        Self { precision: 3 }
+    }
+}
 
 impl Pass for MergePaths {
     fn name(&self) -> &'static str {
@@ -25,7 +35,7 @@ impl Pass for MergePaths {
         }
 
         for parent_id in parents {
-            if merge_adjacent_paths(doc, parent_id) {
+            if merge_adjacent_paths(doc, parent_id, self.precision) {
                 changed = true;
             }
         }
@@ -84,9 +94,34 @@ fn has_inherited_blocking_attr(doc: &Document, id: NodeId) -> bool {
     false
 }
 
+/// Strictly parsed commands and sample points of a path element's `d`.
+/// `None` when the attribute is missing or any part of it fails to parse
+/// (such a path never takes part in a merge, so a truncated tail can never
+/// be copied along).
+fn parsed_path(doc: &Document, id: NodeId) -> Option<(Vec<PathCmd>, PathPoints)> {
+    let NodeKind::Element(ref elem) = doc.node(id).kind else {
+        return None;
+    };
+    let commands = parse_path_strict(elem.attr("d")?)?;
+    let points = gather_points_from(&commands)?;
+    Some((commands, points))
+}
+
+/// Overwrite the unprefixed `d` attribute of element `id`.
+fn set_d(doc: &mut Document, id: NodeId, d: String) {
+    if let NodeKind::Element(ref mut elem) = doc.node_mut(id).kind
+        && let Some(d_attr) = elem
+            .attributes
+            .iter_mut()
+            .find(|a| a.name == "d" && a.prefix.is_none())
+    {
+        d_attr.value = d;
+    }
+}
+
 /// Try to merge adjacent <path> siblings under the given parent.
 /// Returns true if any merge was performed.
-fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId) -> bool {
+fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId, precision: u32) -> bool {
     let mut changed = false;
 
     loop {
@@ -128,92 +163,52 @@ fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId) -> bool {
                 .collect();
 
             if path_ids.len() >= 2 {
-                // Try to merge paths, checking intersection for each pair
-                let mut accumulated_d = String::new();
-                let mut accumulated_points: Option<PathPoints> = None;
+                // Accumulate *parsed* commands, never raw strings: the parser
+                // turns a leading relative `m` into `M` (so the second shape
+                // can't be shifted by the first one's end point), and the
+                // merged `d` is re-serialized at `precision` like SVGO's
+                // js2path. A path that does not parse strictly is never
+                // merged into or onto.
+                let mut acc: Option<(Vec<PathCmd>, PathPoints)> = parsed_path(doc, path_ids[0]);
                 let mut first_id = path_ids[0];
                 let mut merged_ids: Vec<NodeId> = Vec::new();
 
-                // Get first path's d
-                if let NodeKind::Element(ref elem) = doc.node(first_id).kind
-                    && let Some(d) = elem.attr("d")
-                {
-                    accumulated_d.push_str(d);
-                    accumulated_points = gather_points(d);
-                }
-
                 for &path_id in &path_ids[1..] {
-                    let current_d = if let NodeKind::Element(ref elem) = doc.node(path_id).kind
-                        && let Some(d) = elem.attr("d")
+                    let current = parsed_path(doc, path_id);
+
+                    // Merge only when both parse and their geometry is disjoint
+                    if let (Some((acc_cmds, acc_pts)), Some((cur_cmds, cur_pts))) =
+                        (acc.as_mut(), current.as_ref())
+                        && !intersects(acc_pts, cur_pts)
                     {
-                        d.to_string()
-                    } else {
-                        continue;
-                    };
-
-                    // Check if accumulated path intersects with current path
-                    let should_merge = match (&accumulated_points, gather_points(&current_d)) {
-                        (Some(acc), Some(cur)) => !intersects(acc, &cur),
-                        // If we can't parse either path, don't merge (safe default)
-                        _ => false,
-                    };
-
-                    if should_merge {
-                        // Add separator if needed
-                        if !accumulated_d.is_empty()
-                            && !accumulated_d.ends_with(' ')
-                            && !accumulated_d.ends_with('z')
-                            && !accumulated_d.ends_with('Z')
-                        {
-                            accumulated_d.push(' ');
-                        }
-                        accumulated_d.push_str(&current_d);
-
-                        // Update accumulated points
-                        if let Some(ref cur_pts) = gather_points(&current_d)
-                            && let Some(ref mut acc_pts) = accumulated_points
-                        {
-                            acc_pts.merge(cur_pts);
-                        }
-
+                        acc_cmds.extend(cur_cmds.iter().cloned());
+                        acc_pts.merge(cur_pts);
                         merged_ids.push(path_id);
-                    } else {
-                        // Can't merge this path — flush accumulated into first_id
-                        // and start a new accumulation from this path
-                        if !merged_ids.is_empty() {
-                            // Write accumulated d to first path
-                            if let NodeKind::Element(ref mut elem) = doc.node_mut(first_id).kind
-                                && let Some(d_attr) = elem
-                                    .attributes
-                                    .iter_mut()
-                                    .find(|a| a.name == "d" && a.prefix.is_none())
-                            {
-                                d_attr.value = accumulated_d.clone();
-                            }
-                            for &mid in &merged_ids {
-                                doc.remove(mid);
-                            }
-                            merged_any = true;
-                            changed = true;
-                        }
-
-                        // Start fresh from this path
-                        first_id = path_id;
-                        accumulated_d = current_d.clone();
-                        accumulated_points = gather_points(&current_d);
-                        merged_ids.clear();
+                        continue;
                     }
+
+                    // Can't merge this path — flush accumulated into first_id
+                    // and start a new accumulation from this path
+                    if !merged_ids.is_empty() {
+                        if let Some((acc_cmds, _)) = &acc {
+                            set_d(doc, first_id, serialize_path(acc_cmds, precision));
+                        }
+                        for &mid in &merged_ids {
+                            doc.remove(mid);
+                        }
+                        merged_any = true;
+                        changed = true;
+                    }
+
+                    first_id = path_id;
+                    acc = current;
+                    merged_ids.clear();
                 }
 
                 // Flush any remaining accumulated merges
                 if !merged_ids.is_empty() {
-                    if let NodeKind::Element(ref mut elem) = doc.node_mut(first_id).kind
-                        && let Some(d_attr) = elem
-                            .attributes
-                            .iter_mut()
-                            .find(|a| a.name == "d" && a.prefix.is_none())
-                    {
-                        d_attr.value = accumulated_d;
+                    if let Some((acc_cmds, _)) = &acc {
+                        set_d(doc, first_id, serialize_path(acc_cmds, precision));
                     }
                     for &mid in &merged_ids {
                         doc.remove(mid);
@@ -451,14 +446,20 @@ impl PathPoints {
 /// Returns None if the path cannot be parsed *in full*: the merged `d` is
 /// built from the original strings, so a path with an unparseable tail must
 /// never be merged (the garbage would sit mid-path and hide the next shape).
+#[cfg(test)]
 fn gather_points(d: &str) -> Option<PathPoints> {
-    let commands = parse_path_strict(d)?;
+    gather_points_from(&parse_path_strict(d)?)
+}
+
+/// Sample points of every subpath (end points, curve control-polygon
+/// midpoints, arcs via their cubic approximation) for the intersection test.
+fn gather_points_from(commands: &[PathCmd]) -> Option<PathPoints> {
     if commands.is_empty() {
         return None;
     }
 
     // Convert relative to absolute
-    let commands = to_absolute(&commands);
+    let commands = to_absolute(commands);
 
     let mut points = PathPoints::new();
     let mut cursor = [0.0f64; 2];
@@ -542,15 +543,22 @@ fn gather_points(d: &str) -> Option<PathPoints> {
                     a[5],
                     a[6],
                 );
+                // a2c returns each cubic relative to the previous one's end
+                // point (SVGO maps every chunk through `toAbsolute` with the
+                // running base point); sampling the raw relative values put
+                // every arc near the origin and broke the intersection test.
                 let mut base = cursor;
                 for chunk in curves.chunks(6) {
                     if chunk.len() == 6 {
-                        points.add_point([0.5 * (base[0] + chunk[0]), 0.5 * (base[1] + chunk[1])]);
-                        points
-                            .add_point([0.5 * (chunk[0] + chunk[2]), 0.5 * (chunk[1] + chunk[3])]);
-                        points
-                            .add_point([0.5 * (chunk[2] + chunk[4]), 0.5 * (chunk[3] + chunk[5])]);
-                        base = [chunk[4], chunk[5]];
+                        let c: Vec<f64> = chunk
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| v + base[i % 2])
+                            .collect();
+                        points.add_point([0.5 * (base[0] + c[0]), 0.5 * (base[1] + c[1])]);
+                        points.add_point([0.5 * (c[0] + c[2]), 0.5 * (c[1] + c[3])]);
+                        points.add_point([0.5 * (c[2] + c[4]), 0.5 * (c[3] + c[5])]);
+                        base = [c[4], c[5]];
                         points.add_point(base);
                     }
                 }
@@ -722,7 +730,7 @@ fn arc_to_cubic_impl(
     let rotate_x = |x: f64, y: f64, r: f64| x * r.cos() - y * r.sin();
     let rotate_y = |x: f64, y: f64, r: f64| x * r.sin() + y * r.cos();
 
-    let (f1, f2, cx, cy);
+    let (f1, mut f2, cx, cy);
 
     if let Some(rec) = recursive {
         f1 = rec[0];
@@ -730,10 +738,10 @@ fn arc_to_cubic_impl(
         cx = rec[2];
         cy = rec[3];
     } else {
-        x1 = rotate_x(x1, y1, -rad);
-        y1 = rotate_y(x1, y1, -rad);
-        x2 = rotate_x(x2, y2, -rad);
-        y2 = rotate_y(x2, y2, -rad);
+        // Rotate both end points into the ellipse's frame (each pair from
+        // its original coordinates, not from a half-rotated one).
+        (x1, y1) = (rotate_x(x1, y1, -rad), rotate_y(x1, y1, -rad));
+        (x2, y2) = (rotate_x(x2, y2, -rad), rotate_y(x2, y2, -rad));
 
         let x = (x1 - x2) / 2.0;
         let y = (y1 - y2) / 2.0;
@@ -818,13 +826,20 @@ fn arc_to_cubic_impl(
             y2_new,
             rx,
             ry,
-            angle,
+            // Already in the ellipse's rotated frame: the caller rotates the
+            // whole result back once, so the split must not rotate again.
+            0.0,
             0,
             sweep_flag,
             x2old,
             y2old,
             Some([f2_new, f2old, cx, cy]),
         );
+        // Snap's a2c reassigns f2/x2/y2 here so the chunk below spans only
+        // the first 120 degrees; the remainder is in `res`.
+        f2 = f2_new;
+        x2 = x2_new;
+        y2 = y2_new;
     }
 
     let df = f2 - f1;
@@ -1193,7 +1208,7 @@ mod tests {
 
     fn run_pass(input: &str) -> (PassResult, String) {
         let mut doc = parse(input).unwrap();
-        let result = MergePaths.run(&mut doc);
+        let result = MergePaths::default().run(&mut doc);
         (result, serialize(&doc))
     }
 
@@ -1207,7 +1222,7 @@ mod tests {
         // Should be one path with concatenated d
         assert_eq!(output.matches("<path").count(), 1);
         assert!(
-            output.contains("M0 0L10 10") && output.contains("M20 20L30 30"),
+            output.contains("d=\"M0 0 10 10M20 20 30 30\""),
             "expected merged d, got: {output}"
         );
     }
@@ -1409,6 +1424,83 @@ mod tests {
     }
 
     #[test]
+    fn merged_d_is_reserialized_with_absolute_first_moveto() {
+        // A leading relative `m` is absolute per spec; copying it verbatim
+        // after the first path made the second shape start at (55,55).
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"m5 5h10v10H5z\"/><path d=\"m50 50h10v10H50z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed);
+        assert!(
+            output.contains("d=\"M5 5h10v10H5zM50 50h10v10H50z\""),
+            "{output}"
+        );
+
+        // Implicit pairs after the first moveto stay relative linetos; no
+        // separator is inserted before the next piece's `M`.
+        let (_, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"m5 5 10 10z\"/><path d=\"M50 50 60 60 50 60z\"/></svg>",
+        );
+        assert!(
+            output.contains("d=\"M5 5l10 10zM50 50 60 60 50 60z\""),
+            "{output}"
+        );
+
+        // Pieces are re-serialized at the pass precision.
+        let mut doc = parse(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5.00004 5h10v10H5z\"/><path d=\"M50 50h10.0001v10H50z\"/></svg>",
+        )
+        .unwrap();
+        MergePaths { precision: 3 }.run(&mut doc);
+        let output = serialize(&doc);
+        assert!(
+            output.contains("d=\"M5 5h10v10H5zM50 50h10v10H50z\""),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn arc_points_are_absolute_in_intersection_test() {
+        // Half disc (100,0)->(100,100) bulging to x=150, evenodd rect
+        // inside it: merging would punch a hole.
+        let (result, _) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill-rule=\"evenodd\" d=\"M100 0a50 50 0 0 1 0 100z\"/><path fill-rule=\"evenodd\" d=\"M110 40h10v10h-10z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Unchanged);
+        // A rect on the concave side (left of the chord) does not intersect.
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M100 0a50 50 0 0 1 0 100\"/><path d=\"M40 40h10v10H40z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
+        assert!(
+            output.contains("d=\"M100 0a50 50 0 0 1 0 100M40 40h10v10H40z\""),
+            "{output}"
+        );
+        // Two circles 200 units apart (relative arcs used to be sampled as
+        // absolute points near the origin and "intersect").
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M50 50m-25 0a25 25 0 1 0 50 0a25 25 0 1 0-50 0\"/><path d=\"M250 50m-25 0a25 25 0 1 0 50 0a25 25 0 1 0-50 0\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
+        // Overlapping circles still refuse.
+        let (result, _) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M50 50m-25 0a25 25 0 1 0 50 0a25 25 0 1 0-50 0\"/><path d=\"M60 50m-25 0a25 25 0 1 0 50 0a25 25 0 1 0-50 0\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Unchanged);
+        // Rotated ellipse arc over 120 degrees: the split chunks must not be
+        // rotated twice. Major axis vertical (rotation 90), bulge to x<=20;
+        // a rect at x 30..40 is clear of it.
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0A100 20 90 0 1 0 200\"/><path d=\"M30 90h10v20H30z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
+        let (result, _) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0A100 20 90 0 1 0 200z\"/><path d=\"M5 90h10v20H5z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
     fn truncated_paths_are_never_merged() {
         // The merged `d` is built from the original strings, so a path whose
         // tail could not be parsed must stay separate: `L10 M50 50` would
@@ -1423,7 +1515,7 @@ mod tests {
                 "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{bad}\"/><path d=\"M50 50 L60 60 L50 60z\"/></svg>"
             );
             let mut doc = crate::parser::parse(&input).unwrap();
-            let result = MergePaths.run(&mut doc);
+            let result = MergePaths::default().run(&mut doc);
             assert_eq!(result, PassResult::Unchanged, "{bad}");
             assert_eq!(crate::serializer::serialize(&doc), input);
         }

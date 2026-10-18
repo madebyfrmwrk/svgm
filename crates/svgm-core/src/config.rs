@@ -134,7 +134,7 @@ fn create_pass(name: &str, precision: u32) -> Box<dyn Pass> {
         "collapseGroups" => Box::new(passes::collapse_groups::CollapseGroups),
         "cleanupIds" => Box::new(passes::cleanup_ids::CleanupIds),
         "convertPathData" => Box::new(passes::convert_path_data::ConvertPathData { precision }),
-        "mergePaths" => Box::new(passes::merge_paths::MergePaths),
+        "mergePaths" => Box::new(passes::merge_paths::MergePaths { precision }),
         "sortAttrs" => Box::new(passes::sort_attrs::SortAttrs),
         "sortDefsChildren" => Box::new(passes::sort_defs_children::SortDefsChildren),
         "minifyWhitespace" => Box::new(passes::minify_whitespace::MinifyWhitespace),
