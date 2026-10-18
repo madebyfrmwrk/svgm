@@ -1158,6 +1158,41 @@ mod tests {
     }
 
     #[test]
+    fn translate_shifts_leading_relative_moveto() {
+        // The first `m` is absolute per spec: baking a translate into the
+        // path must shift it, while later `m` subpaths stay relative.
+        for (d, expected) in [
+            ("m5 5h10v10z", "M15 15h10v10z"),
+            ("m5 5h10v10zm20 0h5v5z", "M15 15h10v10zm20 0h5v5z"),
+            ("m5 5 10 0 0 10z", "M15 15l10 0 0 10z"),
+        ] {
+            assert_eq!(
+                apply_translate_to_path(d, 10.0, 10.0, 3).unwrap(),
+                expected,
+                "{d}"
+            );
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{d}\" transform=\"translate(10,10)\"/></svg>"
+            );
+            let mut doc = parse(&input).unwrap();
+            assert!(ConvertTransform::default().run(&mut doc).changed());
+            let out = serialize(&doc);
+            assert!(out.contains(&format!("d=\"{expected}\"")), "{out}");
+            assert!(!out.contains("transform"), "{out}");
+        }
+    }
+
+    #[test]
+    fn group_translate_pushed_into_relative_moveto_paths() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 400\">\
+            <g transform=\"translate(200 200)\"><path d=\"m5 5h10v10z\"/><path d=\"m50 50h10v10zm20 0h5v5z\" fill=\"red\"/></g></svg>";
+        let out = crate::optimize(input).unwrap().data;
+        assert!(out.contains("M205 205h10v10z"), "{out}");
+        assert!(out.contains("M250 250h10v10zm20 0h5v5z"), "{out}");
+        assert!(!out.contains("transform"), "{out}");
+    }
+
+    #[test]
     fn european_decimal_normalizer_preserves_non_ascii() {
         assert_eq!(
             normalize_european_decimals("translate(0,7282, 0,9693)"),

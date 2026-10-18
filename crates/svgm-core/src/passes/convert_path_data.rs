@@ -1,5 +1,7 @@
-use super::{Pass, PassResult, representable};
-use crate::ast::{Document, NodeKind};
+use super::{
+    Computed, Pass, PassResult, computed_style_with, representable, stylesheet_declarations,
+};
+use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct ConvertPathData {
     pub precision: u32,
@@ -20,14 +22,27 @@ impl Pass for ConvertPathData {
         let mut changed = false;
         let ids = doc.traverse();
 
+        // A stylesheet rule could attach markers to any path, so when one
+        // declares a marker property every path is treated as marked
+        // (SVGO's `hasMarkerMid` is derived from the computed style).
+        let markers_in_css = stylesheet_declarations(doc)
+            .iter()
+            .any(|(prop, _)| is_marker_prop(prop));
+
         for id in ids {
+            let has_d = matches!(&doc.node(id).kind, NodeKind::Element(e) if e.attr("d").is_some());
+            if !has_d {
+                continue;
+            }
+            let has_markers = markers_in_css || has_marker_style(doc, id);
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind
                 && let Some(d_attr) = elem
                     .attributes
                     .iter_mut()
                     .find(|a| a.name == "d" && a.prefix.is_none())
-                && let Some(optimized) = optimize_path(&d_attr.value, self.precision)
+                && let Some(optimized) =
+                    optimize_path_with(&d_attr.value, self.precision, has_markers)
                 && optimized.len() < d_attr.value.len()
             {
                 d_attr.value = optimized;
@@ -50,8 +65,39 @@ pub(crate) struct PathCmd {
     pub(crate) args: Vec<f64>,
 }
 
-/// Optimize a path `d` attribute string.
+fn is_marker_prop(prop: &str) -> bool {
+    matches!(
+        prop,
+        "marker" | "marker-start" | "marker-mid" | "marker-end"
+    )
+}
+
+/// True when `marker-start` or `marker-mid` (or the `marker` shorthand) is
+/// set on the element, its `style` attribute, or inherited from an ancestor.
+/// Such a path must keep every moveto, since each vertex places a marker.
+fn has_marker_style(doc: &Document, id: NodeId) -> bool {
+    ["marker-start", "marker-mid", "marker"].iter().any(|prop| {
+        match computed_style_with(doc, id, prop, false) {
+            Computed::Static(v) => {
+                let v = v.trim();
+                !v.is_empty() && v != "none"
+            }
+            Computed::Dynamic => true,
+            Computed::Unset => false,
+        }
+    })
+}
+
+/// Optimize a path `d` attribute string (no markers assumed).
+#[cfg(test)]
 fn optimize_path(d: &str, precision: u32) -> Option<String> {
+    optimize_path_with(d, precision, false)
+}
+
+/// Optimize a path `d` attribute string. `has_markers` keeps every moveto
+/// (a redundant `M` immediately followed by another `M` is otherwise
+/// dropped, which would move a `marker-start`/`marker-mid` glyph).
+fn optimize_path_with(d: &str, precision: u32, has_markers: bool) -> Option<String> {
     let commands = parse_path(d)?;
     if commands.is_empty() {
         return None;
@@ -64,7 +110,7 @@ fn optimize_path(d: &str, precision: u32) -> Option<String> {
     let commands = simplify_curves(commands, precision);
     let commands = convert_cubics_to_arcs(commands, precision);
     let commands = detect_shorthands(commands, precision);
-    let commands = remove_redundant(commands, precision);
+    let commands = remove_redundant(commands, precision, has_markers);
 
     // Phase 3: Pick shorter abs/rel per command
     let commands = abs_to_rel(commands, precision);
@@ -823,7 +869,7 @@ fn detect_shorthands(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
 }
 
 /// Remove redundant commands: lines to same point, empty subpaths.
-fn remove_redundant(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
+fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -> Vec<PathCmd> {
     let mut result = Vec::with_capacity(commands.len());
     let mut cx: f64 = 0.0;
     let mut cy: f64 = 0.0;
@@ -832,6 +878,16 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
 
     for (i, cmd) in commands.iter().enumerate() {
         match cmd.cmd {
+            // A moveto immediately followed by another moveto draws nothing:
+            // only the last one positions the pen (SVGO collapses `m`+`m`).
+            // Kept when markers are present, since marker-start/marker-mid
+            // are placed at every vertex including empty subpaths.
+            'M' if !has_markers && commands.get(i + 1).is_some_and(|n| n.cmd == 'M') => {
+                cx = cmd.args[0];
+                cy = cmd.args[1];
+                sx = cx;
+                sy = cy;
+            }
             'L' => {
                 let (x, y) = (cmd.args[0], cmd.args[1]);
                 // Skip line to same point
@@ -1022,6 +1078,16 @@ fn parse_path_inner(d: &str) -> Option<(Vec<PathCmd>, bool)> {
     if truncated && commands.is_empty() {
         // Nothing usable before the bad token: leave the attribute alone.
         return None;
+    }
+
+    // The first moveto is absolute per spec even when written `m` (SVGO's
+    // path2js does the same), so every consumer can treat `commands[0]` as
+    // `M` and shift/serialize it accordingly. Implicit pairs after it were
+    // already split into `l` above and stay relative.
+    if let Some(first) = commands.first_mut()
+        && first.cmd == 'm'
+    {
+        first.cmd = 'M';
     }
 
     Some((commands, truncated))
@@ -2087,13 +2153,76 @@ mod tests {
         let cmds = parse_path("M1 1M50 50L20 20").unwrap();
         let out = serialize_path(&cmds, 3);
         assert!(out.starts_with("M1 1M50 50"), "{out}");
+        // The leading `m` is absolute per spec and is parsed as `M`.
         let cmds = parse_path("m1 1m50 50l20 20").unwrap();
         let out = serialize_path(&cmds, 3);
-        assert!(out.starts_with("m1 1m50 50"), "{out}");
+        assert!(out.starts_with("M1 1m50 50"), "{out}");
         // Round trip: re-parsing the output yields the same command sequence.
         let reparsed = parse_path(&out).unwrap();
         assert_eq!(reparsed.len(), 3);
         assert_eq!(reparsed[1].cmd, 'm');
+    }
+
+    #[test]
+    fn leading_relative_moveto_is_parsed_as_absolute() {
+        // SVGO path2js: the first moveto is absolute even when written `m`.
+        let cmds = parse_path("m5 5 10 0 0 10z").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mllz");
+        let cmds = parse_path_strict("m5 5h10zm20 0h5z").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mhzmhz");
+        // Later `m` subpaths stay relative; the serialized form is unchanged.
+        assert_eq!(serialize_path(&cmds, 3), "M5 5h10zm20 0h5z");
+    }
+
+    #[test]
+    fn moveto_before_moveto_is_dropped() {
+        // SVGO collapses `m`+`m`: only the last moveto positions the pen.
+        assert_eq!(
+            optimize_path("M1 1M50 50L20 20L20 50z", 3).unwrap(),
+            "M50 50 20 20v30z"
+        );
+        let out = optimize_path("M10 10 M20 20 L30 30", 3).unwrap();
+        assert!(!out.contains("M10 10 20 20"), "{out}");
+        assert_eq!(out, "M20 20 30 30");
+        // A merged path with stacked movetos (mergePaths output).
+        let out = optimize_path("M 50 50 M1.25.75 M 50 50 20 20", 3).unwrap();
+        assert_eq!(out, "M50 50 20 20");
+        let reparsed = parse_path(&out).unwrap();
+        assert_eq!(reparsed.iter().map(|c| c.cmd).collect::<String>(), "ML");
+        // SVGO convertPathData.12, last row (SVGO: `M10 50H0m30-40L10 80`;
+        // svgm prefers the absolute form on equal length).
+        assert_eq!(
+            optimize_path("M10 50L0 50M80 50M30 10L10 80", 3).unwrap(),
+            "M10 50H0M30 10 10 80"
+        );
+    }
+
+    #[test]
+    fn moveto_before_moveto_kept_with_markers() {
+        // marker-start / marker-mid place a glyph at every vertex, so a
+        // moveto that draws nothing still matters. Attribute, style
+        // attribute, inherited and stylesheet forms are all honoured.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-mid=\"url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"marker-start:url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g marker-start=\"url(#m)\"><path d=\"M1 1M50 50L20 20L20 50z\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{path{marker-mid:url(#m)}}</style><path d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+        ] {
+            let mut doc = parse_svg(input).unwrap();
+            ConvertPathData::default().run(&mut doc);
+            let out = serialize(&doc);
+            assert!(out.contains("M1 1M50 50"), "{out}");
+        }
+        // marker-end does not involve the leading vertex; `none` is no marker.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-end=\"url(#m)\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path marker-mid=\"none\" d=\"M1 1M50 50L20 20L20 50z\"/></svg>",
+        ] {
+            let mut doc = parse_svg(input).unwrap();
+            ConvertPathData::default().run(&mut doc);
+            let out = serialize(&doc);
+            assert!(out.contains("d=\"M50 50 20 20v30z\""), "{out}");
+        }
     }
 
     #[test]

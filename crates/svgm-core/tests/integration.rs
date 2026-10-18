@@ -337,3 +337,22 @@ fn non_finite_numbers_never_reach_the_output() {
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 }
+
+#[test]
+fn relative_moveto_translate() {
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/relative_moveto_translate.svg",
+    ));
+    assert_valid_svg(&output, "relative_moveto_translate");
+    // The leading `m` of every path is absolute and must carry the translate.
+    assert!(output.contains("M205 205h10v10z"), "{output}");
+    assert!(output.contains("M250 250h10v10zm20 0h5v5z"), "{output}");
+    assert!(output.contains("M300 300"), "{output}");
+    assert!(!output.contains("transform"), "{output}");
+    assert!(
+        !output.contains("M5 5") && !output.contains("m5 5"),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
