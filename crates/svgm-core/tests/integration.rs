@@ -1081,3 +1081,19 @@ fn every_fixture_is_idempotent() {
         );
     }
 }
+
+#[test]
+fn regression_editor_xml_small_items() {
+    // Issue #28: prefixed <foo:metadata> is kept, data-* attributes are kept,
+    // whitespace in xmlns values is normalized. Byte-identical to SVGO 4.0.1.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/editor_xml_small_items.svg",
+    ));
+    assert_valid_svg(&output, "editor_xml_small_items");
+    assert_eq!(
+        output,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:foo=\"http://example.com/foo\" viewBox=\"0 0 10 10\"><foo:metadata>keep me</foo:metadata><g data-name=\"Layer 2\"><path d=\"M0 0h10v10H0z\" data-id=\"7\" data-name=\"bg\"/></g></svg>"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}

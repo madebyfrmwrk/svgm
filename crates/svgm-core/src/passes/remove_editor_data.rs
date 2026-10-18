@@ -107,11 +107,11 @@ impl Pass for RemoveEditorData {
             }
             if let NodeKind::Element(ref mut elem) = node.kind {
                 let before_attrs = elem.attributes.len();
-                elem.attributes.retain(|attr| match attr.prefix {
-                    Some(ref prefix) => !is_editor_prefix(prefix),
-                    // Illustrator's data-name="Layer 1"
-                    None => attr.name != "data-name",
-                });
+                // Unprefixed attributes are never editor data: `data-*`
+                // (Illustrator's data-name="Layer 1") is author data that
+                // SVGO keeps too.
+                elem.attributes
+                    .retain(|attr| attr.prefix.as_deref().is_none_or(|p| !is_editor_prefix(p)));
                 if elem.attributes.len() != before_attrs {
                     changed = true;
                 }
@@ -269,5 +269,26 @@ mod tests {
         let (result, output) = run(input);
         assert_eq!(result, PassResult::Unchanged);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn keeps_data_attributes() {
+        // SVGO parity: data-* is never touched (removeEditorsNSData only
+        // removes namespaced attrs; removeUnknownsAndDefaults keeps data-*).
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"Layer_2\" data-name=\"Layer 2\"><rect data-name=\"bg\" data-id=\"7\"/></g></svg>";
+        let (result, output) = run(input);
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn removes_editor_attrs_but_keeps_data_name_on_same_element() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:inkscape=\"http://www.inkscape.org/namespaces/inkscape\"><g data-name=\"Layer 2\" inkscape:label=\"L\"><rect/></g></svg>";
+        let (result, output) = run(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g data-name=\"Layer 2\"><rect/></g></svg>"
+        );
     }
 }

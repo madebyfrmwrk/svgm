@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generator: Adobe Illustrator 27.0.0, SVG Export Plug-In -->
+<svg xmlns="  http://www.w3.org/2000/svg
+  " xmlns:xlink=" http://www.w3.org/1999/xlink " xmlns:foo="http://example.com/foo" viewBox="0 0 10 10">
+  <foo:metadata>keep me</foo:metadata>
+  <metadata>drop me</metadata>
+  <g id="Layer_2" data-name="Layer 2">
+    <rect width="10" height="10" data-name="bg" data-id="7"/>
+  </g>
+</svg>

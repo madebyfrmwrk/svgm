@@ -31,6 +31,16 @@ impl Pass for CleanupAttrs {
                         }
                     }
                 }
+                // xmlns / xmlns:* are ordinary attributes in SVGO and get the
+                // same cleanup; svgm keeps them in `namespaces`. A padded SVG
+                // namespace URI is not the SVG namespace.
+                for ns in &mut elem.namespaces {
+                    let cleaned = cleanup_whitespace(&ns.uri);
+                    if cleaned != ns.uri {
+                        ns.uri = cleaned;
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -138,5 +148,40 @@ mod tests {
         let mut doc = parse(input).unwrap();
         assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Unchanged);
         assert!(serialize(&doc).contains("style=\"font-family:&quot;a; b&quot;\""));
+    }
+
+    #[test]
+    fn normalizes_whitespace_in_namespace_declarations() {
+        // Port of SVGO cleanupAttrs.01 (pass only: the text node is left
+        // alone, as in the fixture).
+        let input = "<svg xmlns=\"  http://www.w3.org/2000/svg\n  \" attr=\"a      b\" attr2=\"a\nb\">\n    test\n</svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Changed);
+        assert_eq!(
+            serialize(&doc),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" attr=\"a b\" attr2=\"a b\">\n    test\n</svg>"
+        );
+    }
+
+    #[test]
+    fn normalizes_prefixed_namespace_declarations() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\" http://www.w3.org/1999/xlink \"><use xlink:href=\"#a\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Changed);
+        assert!(serialize(&doc).starts_with(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">"
+        ));
+    }
+
+    #[test]
+    fn clean_namespace_declarations_are_unchanged() {
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><use xlink:href=\"#a\"/></svg>",
+            // Un-declaring the default namespace stays as is.
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g xmlns=\"\"/></svg>",
+        ] {
+            let mut doc = parse(input).unwrap();
+            assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Unchanged, "{input}");
+        }
     }
 }
