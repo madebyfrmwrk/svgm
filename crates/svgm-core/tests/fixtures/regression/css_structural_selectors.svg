@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <style>
+    g rect { fill: red; }
+    .a rect { fill: red; }
+    rect[class~=a] { fill: red; }
+    #g rect { fill: red; }
+  </style>
+  <g><rect width="10" height="10"/></g>
+  <g class="a"><rect x="20" width="10" height="10"/></g>
+  <g><rect class="a" x="40" width="10" height="10"/></g>
+  <g id="g"><rect x="60" width="10" height="10"/></g>
+</svg>

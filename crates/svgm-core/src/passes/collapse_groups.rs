@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, has_structural_css};
 use crate::ast::{Document, NodeId, NodeKind};
 
 /// Attributes that have different semantics on a `<g>` than on individual elements.
@@ -14,6 +14,13 @@ impl Pass for CollapseGroups {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
+        // A stylesheet that survived inlineStyles may select by structure
+        // (`g rect`, `.a > rect`, `#g rect`, `:nth-child`); removing or
+        // merging a group would silently change what those rules match.
+        if has_structural_css(doc) {
+            return PassResult::Unchanged;
+        }
+
         let mut changed = false;
 
         // Process bottom-up so inner groups collapse first.
@@ -153,6 +160,23 @@ mod tests {
     use super::*;
     use crate::parser::parse;
     use crate::serializer::serialize;
+
+    #[test]
+    fn structural_css_blocks_collapsing() {
+        for css in [
+            "g rect{fill:red}",
+            ".a rect{fill:red}",
+            "#g rect{fill:red}",
+            "@media print{g{opacity:1}}",
+        ] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><g class=\"a\" id=\"g\"><rect/></g><g><rect/></g></svg>"
+            );
+            let mut doc = parse(&input).unwrap();
+            assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged, "{css}");
+            assert_eq!(serialize(&doc), input, "{css}");
+        }
+    }
 
     #[test]
     fn collapses_attr_less_group() {
