@@ -1,5 +1,7 @@
 use super::convert_path_data::{PathCmd, parse_path_strict, serialize_path};
-use super::{Pass, PassResult};
+use super::{
+    Computed, Pass, PassResult, computed_style_with, style_declaration, stylesheet_declarations,
+};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct MergePaths {
@@ -20,6 +22,12 @@ impl Pass for MergePaths {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
+        // A stylesheet rule could give any path a marker, clip, mask or
+        // url() paint; without selector matching, refuse to merge anything.
+        if stylesheet_blocks_merge(doc) {
+            return PassResult::Unchanged;
+        }
+
         let mut changed = false;
         let ids = doc.traverse();
 
@@ -48,43 +56,64 @@ impl Pass for MergePaths {
     }
 }
 
-/// Attributes that unconditionally block merging.
-const BLOCKING_ATTRS: &[&str] = &[
-    "id",
+/// Properties that block merging when set to anything but `none`: markers
+/// are placed at every vertex of *each* path, and clip/mask geometry in
+/// objectBoundingBox units changes when the bounding box grows (SVGO
+/// mergePaths checks the computed style of each).
+const GEOMETRY_PROPS: &[&str] = &[
     "marker-start",
     "marker-mid",
     "marker-end",
+    "marker",
     "clip-path",
     "mask",
     "mask-image",
 ];
 
-/// Attributes where a url() reference blocks merging — gradient/pattern bounding
-/// box changes when paths are combined.
-const URL_BLOCKING_ATTRS: &[&str] = &["fill", "filter", "stroke"];
-
-/// Inheritable presentation attributes that block merging if present on any ancestor.
-const INHERITED_BLOCKING_ATTRS: &[&str] = &[
-    "marker-start",
-    "marker-mid",
-    "marker-end",
-    "clip-path",
-    "mask",
-    "mask-image",
-];
+/// Properties that block merging when they reference a paint server or
+/// filter via `url()`: objectBoundingBox gradients, patterns and filter
+/// regions change when paths are combined.
+const URL_PROPS: &[&str] = &["fill", "filter", "stroke"];
 
 /// Check if a string contains a `url(` reference.
 fn contains_url_ref(value: &str) -> bool {
     value.contains("url(")
 }
 
-/// Check if any ancestor of the given node has an inheritable blocking attribute.
-fn has_inherited_blocking_attr(doc: &Document, id: NodeId) -> bool {
+/// A value that activates a marker/clip/mask property.
+fn is_set(value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && v != "none"
+}
+
+/// True when the path's computed style (its `style` attribute, its
+/// presentation attributes, and for inheritable properties its ancestors')
+/// makes merging unsafe. An ancestor's `clip-path`/`mask` is not inherited
+/// in CSS terms, but stays blocking as before: the group's clip applies to
+/// everything rendered inside it, and an objectBoundingBox clip on a group
+/// is uncommon enough to refuse conservatively.
+fn element_blocks_merge(doc: &Document, id: NodeId) -> bool {
+    for prop in GEOMETRY_PROPS {
+        if let Computed::Static(v) = computed_style_with(doc, id, prop, false)
+            && is_set(&v)
+        {
+            return true;
+        }
+    }
+    for prop in URL_PROPS {
+        if let Computed::Static(v) = computed_style_with(doc, id, prop, false)
+            && contains_url_ref(&v)
+        {
+            return true;
+        }
+    }
     let mut current = doc.node(id).parent;
     while let Some(parent_id) = current {
         if let NodeKind::Element(ref elem) = doc.node(parent_id).kind {
-            for attr in &elem.attributes {
-                if attr.prefix.is_none() && INHERITED_BLOCKING_ATTRS.contains(&attr.name.as_str()) {
+            for prop in ["clip-path", "mask", "mask-image"] {
+                let value =
+                    style_declaration(elem, prop).or_else(|| elem.attr(prop).map(str::to_string));
+                if value.is_some_and(|v| is_set(&v)) {
                     return true;
                 }
             }
@@ -92,6 +121,17 @@ fn has_inherited_blocking_attr(doc: &Document, id: NodeId) -> bool {
         current = doc.node(parent_id).parent;
     }
     false
+}
+
+/// True when a remaining stylesheet rule could set a blocking property on
+/// some path (selectors are not resolved here, so any such declaration
+/// disables merging for the whole document — SVGO resolves them per
+/// element via computeStyle).
+fn stylesheet_blocks_merge(doc: &Document) -> bool {
+    stylesheet_declarations(doc).iter().any(|(prop, value)| {
+        (GEOMETRY_PROPS.contains(&prop.as_str()) && is_set(value))
+            || (URL_PROPS.contains(&prop.as_str()) && contains_url_ref(value))
+    })
 }
 
 /// Strictly parsed commands and sample points of a path element's `d`.
@@ -249,36 +289,28 @@ fn is_mergeable_path(doc: &Document, id: NodeId) -> bool {
         _ => return false,
     };
 
-    // Must have a d attribute
-    if elem.attr("d").is_none() {
+    // Must have a d attribute; an id may be referenced (use/CSS/script)
+    if elem.attr("d").is_none() || elem.attr("id").is_some() {
         return false;
     }
 
-    // Block if it has any attributes that make merging unsafe
-    for attr in &elem.attributes {
-        if attr.prefix.is_none() {
-            if BLOCKING_ATTRS.contains(&attr.name.as_str()) {
-                return false;
-            }
-            // Block if fill, stroke, or filter uses url() references
-            if URL_BLOCKING_ATTRS.contains(&attr.name.as_str()) && contains_url_ref(&attr.value) {
-                return false;
-            }
-        }
-    }
-
-    // Block if any ancestor has an inheritable blocking attribute
-    if has_inherited_blocking_attr(doc, id) {
+    // Markers, clip/mask, url() paints — from attributes, style="" or
+    // inherited from ancestors
+    if element_blocks_merge(doc, id) {
         return false;
     }
 
-    // Block if it has animation children
+    // SVGO merges only childless paths: <title>/<desc> are accessibility
+    // content, animation elements target their parent, and anything else
+    // would be silently dropped with the element. Whitespace-only text
+    // (formatting) is the one exception.
     for child_id in doc.children(id) {
-        if let NodeKind::Element(ref child_elem) = doc.node(child_id).kind {
-            match child_elem.name.as_str() {
-                "animate" | "animateTransform" | "animateMotion" | "set" => return false,
-                _ => {}
-            }
+        let child = doc.node(child_id);
+        if child.removed {
+            continue;
+        }
+        if !matches!(&child.kind, NodeKind::Text(t) if t.trim().is_empty()) {
+            return false;
         }
     }
 
@@ -1498,6 +1530,121 @@ mod tests {
             "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0A100 20 90 0 1 0 200z\"/><path d=\"M5 90h10v20H5z\"/></svg>",
         );
         assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn no_merge_with_title_or_desc_children() {
+        // SVGO merges only childless paths; a11y content must not vanish.
+        for child in ["<title>Left</title>", "<desc>Left shape</desc>", "<!--c-->"] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h10v10H0z\">{child}</path><path d=\"M50 50h10v10H50z\"/></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{output}");
+            assert_eq!(output.matches("<path").count(), 2, "{output}");
+        }
+        // Whitespace-only text (formatting) is not content.
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h10v10H0z\">  \n </path><path d=\"M50 50h10v10H50z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
+        assert_eq!(output.matches("<path").count(), 1, "{output}");
+    }
+
+    #[test]
+    fn no_merge_with_style_or_inherited_url_paint() {
+        let cases = [
+            // style="" on the paths themselves
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"fill:url(#g)\" d=\"M0 0h10v10H0z\"/><path style=\"fill:url(#g)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"stroke:url(#g)\" d=\"M0 0h10v10H0z\"/><path style=\"stroke:url(#g)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"filter:url(#f)\" d=\"M0 0h10v10H0z\"/><path style=\"filter:url(#f)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"clip-path:url(#c)\" d=\"M0 0h10v10H0z\"/><path style=\"clip-path:url(#c)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"clip-path:circle(25%)\" d=\"M0 0h10v10H0z\"/><path style=\"clip-path:circle(25%)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"mask:url(#m)\" d=\"M0 0h10v10H0z\"/><path style=\"mask:url(#m)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"mask-image: linear-gradient(to left top,black, transparent)\" d=\"M0 0h10v10H0z\"/><path style=\"mask-image: linear-gradient(to left top,black, transparent)\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"marker-mid:url(#m)\" d=\"M0 0h10v10H0z\"/><path style=\"marker-mid:url(#m)\" d=\"M50 50h10v10H50z\"/></svg>",
+            // inherited from an ancestor, attribute and style forms
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g fill=\"url(#g)\"><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"fill:url(#g)\"><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"stroke:url(#g)\"><g><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g marker-start=\"url(#m)\"><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"clip-path:url(#c)\"><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></svg>",
+        ];
+        for input in cases {
+            let (result, output) = run_pass(input);
+            assert_eq!(result, PassResult::Unchanged, "{output}");
+        }
+        // `none` and a plain colour do not block; a solid fill on a group
+        // is inherited identically by the merged path.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path style=\"clip-path:none;fill:red\" d=\"M0 0h10v10H0z\"/><path style=\"clip-path:none;fill:red\" d=\"M50 50h10v10H50z\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g fill=\"red\" style=\"stroke:blue\"><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></g></svg>",
+        ] {
+            let (result, output) = run_pass(input);
+            assert_eq!(result, PassResult::Changed, "{output}");
+            assert_eq!(output.matches("<path").count(), 1, "{output}");
+        }
+    }
+
+    #[test]
+    fn stylesheet_declaring_blocking_props_disables_merging() {
+        // SVGO mergePaths.08-12: rules in a remaining <style> may give any
+        // path a url() paint, filter, clip-path or mask. Without selector
+        // matching, nothing is merged in that document.
+        let rules = [
+            "path.lg{fill:url(#gradient);}",
+            "path.lg{stroke:url(#gradient);}",
+            "path.lg{filter:url(#blurMe);}",
+            "path.lg{clip-path:url(#myClip);}",
+            "path.lg{mask:url(#mask);}",
+            "@media print{.x{marker-mid:url(#m)}}",
+        ];
+        for rule in rules {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{rule}</style><path class=\"lg\" d=\"M0 0h10v10H0z\"/><path class=\"lg\" d=\"M50 50h10v10H50z\"/><path d=\"M100 0h10v10h-10z\"/><path d=\"M150 50h10v10h-10z\"/></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{rule}: {output}");
+            assert_eq!(output.matches("<path").count(), 4, "{rule}: {output}");
+        }
+        // A stylesheet that declares none of those still allows merging.
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>path{stroke-width:2;fill:red;clip-path:none}</style><path d=\"M0 0h10v10H0z\"/><path d=\"M50 50h10v10H50z\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
+        assert_eq!(output.matches("<path").count(), 1, "{output}");
+    }
+
+    #[test]
+    fn svgo_merge_paths_fixtures_08_to_12_stay_unmerged() {
+        // Full optimizer run on the SVGO fixture shapes: after inlineStyles
+        // the class rules become attributes and still block.
+        let fixture = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 300 300\">\
+            <style>path.lg{fill:url(#gradient);}</style>\
+            <linearGradient id=\"gradient\"><stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#0000ff\"/></linearGradient>\
+            <path fill=\"url(#gradient)\" d=\"M 0 0 H 100 V 80 H 0 z\"/>\
+            <path fill=\"url(#gradient)\" d=\"M 200 0 H 300 V 80 H 200 z\"/>\
+            <path style=\"fill:url(#gradient)\" d=\"M 0 100 h 100 v 80 H 0 z\"/>\
+            <path style=\"fill:url(#gradient)\" d=\"M 200 100 H 300 v 80 H 200 z\"/>\
+            <path class=\"lg\" d=\"M 0 200 h 100 v 80 H 0 z\"/>\
+            <path class=\"lg\" d=\"M 200 200 H 300 v 80 H 200 z\"/>\
+            </svg>";
+        let out = crate::optimize(fixture).unwrap().data;
+        assert_eq!(out.matches("<path").count(), 6, "{out}");
+        let fixture = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-5 -5 400 400\">\
+            <style>path.lg{mask:url(#mask);}</style>\
+            <mask id=\"mask\" maskContentUnits=\"objectBoundingBox\"><rect fill=\"white\" x=\"0\" y=\"0\" width=\"100%\" height=\"100%\"/><circle fill=\"black\" cx=\".5\" cy=\".5\" r=\".5\"/></mask>\
+            <path mask=\"url(#mask)\" fill=\"red\" d=\"M 0 0 H 100 V 80 H 0 z\"/>\
+            <path mask=\"url(#mask)\" fill=\"red\" d=\"M 200 0 H 300 V 80 H 200 z\"/>\
+            <path style=\"mask:url(#mask)\" fill=\"red\" d=\"M 0 100 h 100 v 80 H 0 z\"/>\
+            <path style=\"mask:url(#mask)\" fill=\"red\" d=\"M 200 100 H 300 v 80 H 200 z\"/>\
+            <path class=\"lg\" fill=\"red\" d=\"M 0 200 h 100 v 80 H 0 z\"/>\
+            <path class=\"lg\" fill=\"red\" d=\"M 200 200 H 300 v 80 H 200 z\"/>\
+            <path style=\"mask-image: linear-gradient(to left top,black, transparent)\" fill=\"red\" d=\"M 0 300 h 100 v 80 H 0 z\"/>\
+            <path style=\"mask-image: linear-gradient(to left top,black, transparent)\" fill=\"red\" d=\"M 200 300 H 300 v 80 H 200 z\"/>\
+            </svg>";
+        let out = crate::optimize(fixture).unwrap().data;
+        assert_eq!(out.matches("<path").count(), 8, "{out}");
     }
 
     #[test]
