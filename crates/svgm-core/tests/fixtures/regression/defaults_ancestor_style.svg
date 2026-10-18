@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" overflow="visible">
+  <style>@media (prefers-color-scheme: dark) { #k { fill: red } } #h:hover { stroke: blue } .x { fill: red }</style>
+  <g style="fill:red"><path fill="black" d="M0 0h5v5z"/></g>
+  <g fill="red" style="fill:blue"><path fill="red" d="M5 5h5v5z"/></g>
+  <g style="stroke:red;stroke-width:3"><path stroke="none" stroke-width="1" d="M0 5h5v5z"/></g>
+  <g id="k"><path fill="black" d="M0 0h5v5z"/></g>
+  <g id="h"><path stroke="none" d="M0 0h5v5z"/></g>
+  <g class="x"><path fill="black" d="M0 0h5v5z"/></g>
+  <image overflow="visible" href="a.png" width="1" height="1"/>
+</svg>

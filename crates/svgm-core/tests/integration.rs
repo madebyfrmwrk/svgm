@@ -701,3 +701,237 @@ fn relative_moveto_translate() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+// ── WP3 regression fixtures ─────────────────────────────────────────────
+
+fn optimize_fixture_both_presets(name: &str) -> (String, String) {
+    let path = format!("tests/fixtures/regression/{name}");
+    let input = fs::read_to_string(&path).unwrap();
+    let default = svgm_core::optimize(&input).unwrap().data;
+    let safe = svgm_core::optimize_with_config(
+        &input,
+        &svgm_core::Config {
+            preset: svgm_core::Preset::Safe,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .data;
+    assert_valid_svg(&default, name);
+    assert_valid_svg(&safe, name);
+    (default, safe)
+}
+
+#[test]
+fn regression_cdata_text() {
+    let (default, safe) = optimize_fixture_both_presets("cdata_text.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // <text>/<tspan> whose only content is a CDATA section are not empty.
+        assert_eq!(
+            output.matches("<text").count(),
+            3,
+            "{preset}: all three text elements must survive: {output}"
+        );
+        assert!(
+            output.contains("a &lt; b &amp; c") || output.contains("<![CDATA[a < b & c]]>"),
+            "{preset}: CDATA content must survive: {output}"
+        );
+        assert!(output.contains("second"), "{preset}: {output}");
+        // Whitespace between words inside <a> nested in <text> is rendered.
+        assert!(
+            output.contains("<tspan>read</tspan> <tspan>more</tspan>"),
+            "{preset}: space between words must survive: {output}"
+        );
+    }
+}
+
+#[test]
+fn regression_defaults_ancestor_style() {
+    let (default, safe) = optimize_fixture_both_presets("defaults_ancestor_style.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // Ancestors set fill/stroke via style="" or stylesheet rules, so the
+        // "default-looking" values on the paths are real overrides.
+        assert_eq!(
+            output.matches("fill=\"#000\"").count() + output.matches("fill=\"black\"").count(),
+            3,
+            "{preset}: the three fill=black overrides must survive: {output}"
+        );
+        assert_eq!(
+            output.matches("stroke=\"none\"").count(),
+            2,
+            "{preset}: both stroke=none overrides must survive: {output}"
+        );
+        assert!(
+            output.contains("stroke-width=\"1\""),
+            "{preset}: stroke-width=1 override must survive: {output}"
+        );
+        // fill="red" under <g fill="red" style="fill:blue"> is an override.
+        assert!(
+            output.contains("fill=\"red\"") && output.contains("fill:blue"),
+            "{preset}: {output}"
+        );
+        // overflow="visible" is not a default on svg/image.
+        assert_eq!(
+            output.matches("overflow=\"visible\"").count(),
+            2,
+            "{preset}: {output}"
+        );
+    }
+}
+
+#[test]
+fn regression_hidden_elems_css() {
+    let (default, safe) = optimize_fixture_both_presets("hidden_elems_css.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // display="none" may be overridden by the stylesheet (.show, :hover)
+        // or by style="display:inline": all three rects render.
+        assert!(
+            output.contains("display=\"block\"") || output.contains("class=\"show\""),
+            "{preset}: {output}"
+        );
+        assert!(output.contains("class=\"hov\""), "{preset}: {output}");
+        assert!(output.contains(".hov:hover"), "{preset}: {output}");
+        assert!(output.contains("display:inline"), "{preset}: {output}");
+        // Nothing with display="none" was deleted.
+        assert_eq!(
+            output.matches("display=\"none\"").count()
+                + output.matches("display=\"block\"").count(),
+            3,
+            "{preset}: {output}"
+        );
+        // A marker with display:none is still rendered where referenced.
+        assert!(output.contains("<marker"), "{preset}: {output}");
+        // SVG2 auto radius: <ellipse ry="2"> renders as a circle.
+        assert!(
+            output.contains("<ellipse") || output.contains("<circle"),
+            "{preset}: {output}"
+        );
+        // Zero-length line with round caps renders a dot.
+        assert!(
+            output.contains("stroke-linecap=\"round\""),
+            "{preset}: {output}"
+        );
+        // fill=none + stroke=none is not a removal rule (hit area).
+        assert!(
+            output.contains("pointer-events=\"all\""),
+            "{preset}: {output}"
+        );
+        // Percent / unit coordinates are not numbers: the rect stays a rect
+        // at x=25%, and the 100%-long line stays a line.
+        assert!(output.contains("x=\"25%\""), "{preset}: {output}");
+        assert!(output.contains("height=\"1em\""), "{preset}: {output}");
+        assert!(output.contains("x2=\"100%\""), "{preset}: {output}");
+    }
+}
+
+#[test]
+fn regression_stroke_fill_inherited() {
+    let (default, safe) = optimize_fixture_both_presets("stroke_fill_inherited.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // Stroke comes from the root <svg> / a group style="": the stroke
+        // sub-properties on the shapes are not useless.
+        assert!(
+            output.contains("stroke-dasharray=\"2 1\""),
+            "{preset}: {output}"
+        );
+        assert_eq!(
+            output.matches("stroke-width=\"4\"").count(),
+            2,
+            "{preset}: group-styled path and <use> target keep stroke-width: {output}"
+        );
+        // Own style="" beats the presentation attribute.
+        assert!(
+            output.contains("stroke:red") && output.contains("stroke-width=\"3\""),
+            "{preset}: {output}"
+        );
+        assert!(
+            output.contains("fill:red") && output.contains("fill-rule=\"evenodd\""),
+            "{preset}: {output}"
+        );
+        // marker-end scales with stroke-width even when the stroke is none.
+        assert!(output.contains("stroke-width=\"5\""), "{preset}: {output}");
+        // The Feather-style icon keeps its inherited round caps.
+        assert!(
+            output.contains("stroke-linecap=\"round\""),
+            "{preset}: {output}"
+        );
+    }
+    // Under <g stroke="none"> the sub-properties really are useless.
+    assert!(!default.contains("stroke-width=\"9\""), "{default}");
+    assert!(!default.contains("stroke-dasharray=\"3\""), "{default}");
+}
+
+#[test]
+fn regression_feather_info() {
+    // Feather-style icon: the "i" dot is a zero-length line that renders
+    // thanks to the inherited round linecap.
+    let (default, safe) = optimize_fixture_both_presets("feather_info.svg");
+    // Safe preset converts nothing: both lines survive as lines.
+    assert_eq!(safe.matches("<line").count(), 2, "{safe}");
+    assert!(safe.contains("d=\"M4 4l0 0\""), "{safe}");
+    // Default preset: the dot becomes a path that still draws a segment
+    // (`M12 8h0`), and the explicit zero-length path keeps its segment.
+    assert!(
+        default.contains("M12 8h0") || default.contains("x1=\"12\" x2=\"12\" y1=\"8\" y2=\"8\""),
+        "{default}"
+    );
+    assert!(default.contains("M4 4h0"), "{default}");
+    // Markers-only path keeps a direction via `z`; marker-mid blocks the
+    // v+v merge.
+    assert!(default.contains("M5 5z"), "{default}");
+    assert!(default.contains("M0 0v5 5"), "{default}");
+    let again = svgm_core::optimize(&default).unwrap();
+    assert_eq!(again.data, default, "not idempotent");
+}
+
+#[test]
+fn regression_group_style_vs_child_attr() {
+    let (default, safe) = optimize_fixture_both_presets("group_style_vs_child_attr.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // A group's style="" must not be merged onto a child whose
+        // presentation attribute it would override (no <style> here, so the
+        // ancestor values are static and collapseGroups is the only guard).
+        assert_eq!(
+            output.matches("fill=\"#000\"").count() + output.matches("fill=\"black\"").count(),
+            3,
+            "{preset}: the three fill=black paths must stay black: {output}"
+        );
+        // (stroke-width="1" is legitimately dropped: the path's own
+        // stroke="none" makes it useless, as in SVGO.)
+        assert!(
+            output.contains("stroke=\"none\""),
+            "{preset}: stroke=none override must survive: {output}"
+        );
+        assert_eq!(
+            output.matches("<g").count(),
+            4,
+            "{preset}: all four groups must be kept: {output}"
+        );
+    }
+}
+
+#[test]
+fn regression_tspan_word_separator() {
+    let (default, safe) = optimize_fixture_both_presets("tspan_word_separator.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // A whitespace-only <tspan> separates words; only elements with no
+        // children at all are empty (SVGO removeEmptyText parity).
+        assert!(
+            output.contains("read<tspan> </tspan>more"),
+            "{preset}: inter-word tspan must survive: {output}"
+        );
+        assert!(
+            output.contains("<tspan>read</tspan><tspan> </tspan><tspan>more</tspan>"),
+            "{preset}: inter-word tspan between tspans must survive: {output}"
+        );
+        assert!(
+            output.contains("<tspan> </tspan></text>"),
+            "{preset}: whitespace tspan after CDATA must survive: {output}"
+        );
+        assert!(
+            !output.contains("y=\"18\"><tspan></tspan>")
+                && !output.contains("<text x=\"50\" y=\"18\""),
+            "{preset}: text holding only an empty tspan must go: {output}"
+        );
+        assert_eq!(output.matches("<text").count(), 3, "{preset}: {output}");
+    }
+}

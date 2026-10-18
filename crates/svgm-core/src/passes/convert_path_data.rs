@@ -1,6 +1,6 @@
 use super::{
-    Computed, Pass, PassResult, computed_style_with, representable, strong_round,
-    stylesheet_declarations,
+    Computed, Pass, PassResult, computed_style_with, has_scripts, has_stylesheet, representable,
+    strong_round, stylesheet_declarations,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -14,6 +14,56 @@ impl Default for ConvertPathData {
     }
 }
 
+/// Per-element rendering context that constrains which path commands may
+/// be dropped or merged (SVGO's `isSafeToRemove` / `hasMarkerMid` /
+/// `isMarkersOnlyPath`).
+#[derive(Debug, Clone, Copy, Default)]
+struct PathOpts {
+    /// The element may be stroked with a non-butt linecap: a zero-length
+    /// segment directly after a moveto renders a dot and must be kept.
+    keep_first_zero_draw: bool,
+    /// A marker-mid may apply: every vertex is visible, so consecutive
+    /// h/v commands are never merged.
+    has_marker_mid: bool,
+    /// marker-start / marker-mid (or the `marker` shorthand) may apply,
+    /// from an attribute, `style`, an ancestor or a stylesheet: every moveto
+    /// places a glyph, so a moveto before another moveto is kept.
+    has_markers: bool,
+    /// The element has marker-start/marker-end: a path that loses all of
+    /// its vertices gets a `z` so the marker keeps a direction.
+    has_marker_start_or_end: bool,
+}
+
+/// Compute [`PathOpts`] for element `id` from its computed style.
+/// `dynamic` (a stylesheet or script exists) makes every stroke value
+/// unknown, which resolves to the conservative choice. `markers_in_css`
+/// (a stylesheet declares a marker property) marks every path.
+fn path_opts(doc: &Document, id: NodeId, dynamic: bool, markers_in_css: bool) -> PathOpts {
+    let maybe_has_stroke = match computed_style_with(doc, id, "stroke", dynamic) {
+        Computed::Dynamic => true,
+        Computed::Static(v) => v.trim() != "none",
+        Computed::Unset => false,
+    };
+    let maybe_has_linecap = match computed_style_with(doc, id, "stroke-linecap", dynamic) {
+        Computed::Dynamic => true,
+        Computed::Static(v) => v.trim() != "butt",
+        Computed::Unset => false,
+    };
+    let has_marker_mid =
+        markers_in_css || marker_is_set(doc, id, "marker-mid") || marker_is_set(doc, id, "marker");
+    let has_markers = has_marker_mid || marker_is_set(doc, id, "marker-start");
+    let has_marker_start_or_end = markers_in_css
+        || marker_is_set(doc, id, "marker-start")
+        || marker_is_set(doc, id, "marker-end")
+        || marker_is_set(doc, id, "marker");
+    PathOpts {
+        keep_first_zero_draw: maybe_has_stroke && maybe_has_linecap,
+        has_marker_mid,
+        has_markers,
+        has_marker_start_or_end,
+    }
+}
+
 impl Pass for ConvertPathData {
     fn name(&self) -> &'static str {
         "convertPathData"
@@ -22,6 +72,7 @@ impl Pass for ConvertPathData {
     fn run(&self, doc: &mut Document) -> PassResult {
         let mut changed = false;
         let ids = doc.traverse();
+        let dynamic = has_stylesheet(doc) || has_scripts(doc);
 
         // A stylesheet rule could attach markers to any path, so when one
         // declares a marker property every path is treated as marked
@@ -30,20 +81,24 @@ impl Pass for ConvertPathData {
             .iter()
             .any(|(prop, _)| is_marker_prop(prop));
 
-        for id in ids {
-            let has_d = matches!(&doc.node(id).kind, NodeKind::Element(e) if e.attr("d").is_some());
-            if !has_d {
-                continue;
-            }
-            let has_markers = markers_in_css || has_marker_style(doc, id);
+        // Read-only pre-pass: which elements carry path data, and in what
+        // rendering context.
+        let targets: Vec<(NodeId, PathOpts)> = ids
+            .into_iter()
+            .filter(
+                |&id| matches!(&doc.node(id).kind, NodeKind::Element(e) if e.attr("d").is_some()),
+            )
+            .map(|id| (id, path_opts(doc, id, dynamic, markers_in_css)))
+            .collect();
+
+        for (id, opts) in targets {
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind
                 && let Some(d_attr) = elem
                     .attributes
                     .iter_mut()
                     .find(|a| a.name == "d" && a.prefix.is_none())
-                && let Some(optimized) =
-                    optimize_path_with(&d_attr.value, self.precision, has_markers)
+                && let Some(optimized) = optimize_path_with(&d_attr.value, self.precision, opts)
                 && optimized.len() < d_attr.value.len()
             {
                 d_attr.value = optimized;
@@ -73,36 +128,34 @@ fn is_marker_prop(prop: &str) -> bool {
     )
 }
 
-/// True when `marker-start` or `marker-mid` (or the `marker` shorthand) is
-/// set on the element, its `style` attribute, or inherited from an ancestor.
-/// Such a path must keep every moveto, since each vertex places a marker.
-fn has_marker_style(doc: &Document, id: NodeId) -> bool {
-    ["marker-start", "marker-mid", "marker"].iter().any(|prop| {
-        match computed_style_with(doc, id, prop, false) {
-            Computed::Static(v) => {
-                let v = v.trim();
-                !v.is_empty() && v != "none"
-            }
-            Computed::Dynamic => true,
-            Computed::Unset => false,
+/// True when `prop` (a marker property) is set to something other than
+/// `none` on the element, its `style` attribute, or inherited from an
+/// ancestor. Stylesheet-declared markers are handled by the caller.
+fn marker_is_set(doc: &Document, id: NodeId, prop: &str) -> bool {
+    match computed_style_with(doc, id, prop, false) {
+        Computed::Static(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "none"
         }
-    })
+        Computed::Dynamic => true,
+        Computed::Unset => false,
+    }
 }
 
-/// Optimize a path `d` attribute string (no markers assumed).
+/// Optimize a path `d` attribute string with no rendering context (no
+/// stroke caps, no markers).
 #[cfg(test)]
 fn optimize_path(d: &str, precision: u32) -> Option<String> {
-    optimize_path_with(d, precision, false)
+    optimize_path_with(d, precision, PathOpts::default())
 }
 
-/// Optimize a path `d` attribute string. `has_markers` keeps every moveto
-/// (a redundant `M` immediately followed by another `M` is otherwise
-/// dropped, which would move a `marker-start`/`marker-mid` glyph).
-fn optimize_path_with(d: &str, precision: u32, has_markers: bool) -> Option<String> {
+/// Optimize a path `d` attribute string in the rendering context `opts`.
+fn optimize_path_with(d: &str, precision: u32, opts: PathOpts) -> Option<String> {
     let commands = parse_path(d)?;
     if commands.is_empty() {
         return None;
     }
+    let includes_vertices = commands.iter().any(|c| c.cmd != 'M' && c.cmd != 'm');
 
     // Phase 1: Normalize to absolute, expand S→C and T→Q for re-analysis
     let commands = normalize_to_absolute(commands);
@@ -111,18 +164,32 @@ fn optimize_path_with(d: &str, precision: u32, has_markers: bool) -> Option<Stri
     let commands = simplify_curves(commands, precision);
     let commands = convert_cubics_to_arcs(commands, precision);
     let commands = detect_shorthands(commands, precision);
-    let commands = remove_redundant(commands, precision, has_markers);
+    let commands = remove_redundant(commands, precision, opts);
 
     // Phase 3: Merge runs of same-direction horizontal/vertical lines
     // (h+h→h, v+v→v) while still absolute, so the abs/rel choice below sees
     // the merged segment (SVGO collapses before picking the shorter form).
-    let commands = merge_collinear_lines(commands);
+    // Skipped when a marker-mid may apply: every vertex renders a marker.
+    let commands = merge_collinear_lines(commands, opts.has_marker_mid);
 
     // Phase 4: Pick shorter abs/rel per command
     let commands = abs_to_rel(commands, precision);
 
     // Phase 5: Simplify arc radii (round equal rx/ry to lower precision when safe)
-    let commands = simplify_arc_radii(commands, precision);
+    let mut commands = simplify_arc_radii(commands, precision);
+
+    // Markers-only path (SVGO isMarkersOnlyPath): the input drew something
+    // but every segment collapsed, leaving only movetos. Append `z` so the
+    // marker still has a direction and renders consistently.
+    if opts.has_marker_start_or_end
+        && includes_vertices
+        && commands.iter().all(|c| c.cmd == 'M' || c.cmd == 'm')
+    {
+        commands.push(PathCmd {
+            cmd: 'z',
+            args: Vec::new(),
+        });
+    }
 
     // Never emit `inf`/`NaN` or 300-digit expansions into path data
     // (arithmetic on huge coordinates can overflow even though the parser
@@ -884,8 +951,15 @@ fn detect_shorthands(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
 }
 
 /// Remove redundant commands: lines to same point, empty subpaths.
-fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -> Vec<PathCmd> {
-    let mut result = Vec::with_capacity(commands.len());
+/// Remove redundant commands: lines to same point, empty subpaths.
+///
+/// With `opts.keep_first_zero_draw` a zero-length line directly after a
+/// moveto (or closepath) is kept: with a round/square linecap it renders a
+/// dot (SVGO `isSafeToRemove(isFirstDraw)`). With `opts.has_markers` a
+/// moveto directly before another moveto is kept, since marker-start /
+/// marker-mid place a glyph at every vertex including empty subpaths.
+fn remove_redundant(commands: Vec<PathCmd>, precision: u32, opts: PathOpts) -> Vec<PathCmd> {
+    let mut result: Vec<PathCmd> = Vec::with_capacity(commands.len());
     let mut cx: f64 = 0.0;
     let mut cy: f64 = 0.0;
     let mut sx: f64 = 0.0;
@@ -897,7 +971,7 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -
             // only the last one positions the pen (SVGO collapses `m`+`m`).
             // Kept when markers are present, since marker-start/marker-mid
             // are placed at every vertex including empty subpaths.
-            'M' if !has_markers && commands.get(i + 1).is_some_and(|n| n.cmd == 'M') => {
+            'M' if !opts.has_markers && commands.get(i + 1).is_some_and(|n| n.cmd == 'M') => {
                 cx = cmd.args[0];
                 cy = cmd.args[1];
                 sx = cx;
@@ -905,8 +979,16 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -
             }
             'L' => {
                 let (x, y) = (cmd.args[0], cmd.args[1]);
-                // Skip line to same point
+                // Skip line to same point, unless it is the first draw of a
+                // subpath and a linecap may render it. A command right after
+                // closepath starts a new subpath at the closed subpath's
+                // start point, so `Z` counts as a subpath start too.
                 if approx_eq(x, cx, precision) && approx_eq(y, cy, precision) {
+                    let is_first_draw = result.last().is_some_and(|p| matches!(p.cmd, 'M' | 'Z'));
+                    if !(opts.keep_first_zero_draw && is_first_draw) {
+                        continue;
+                    }
+                    result.push(cmd.clone());
                     continue;
                 }
                 // Skip line to subpath start right before Z (z closes automatically)
@@ -937,6 +1019,13 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -
                     .chunks(2)
                     .all(|p| approx_eq(p[0], cx, precision) && approx_eq(p[1], cy, precision))
                 {
+                    // Same first-draw exception as for `L`: a linecap renders
+                    // a zero-length first segment as a dot.
+                    let is_first_draw = result.last().is_some_and(|p| matches!(p.cmd, 'M' | 'Z'));
+                    if !(opts.keep_first_zero_draw && is_first_draw) {
+                        continue;
+                    }
+                    result.push(cmd.clone());
                     continue;
                 }
                 let (x, y) = (args[args.len() - 2], args[args.len() - 1]);
@@ -1546,8 +1635,12 @@ fn advance_point(cmd: &PathCmd, cx: &mut f64, cy: &mut f64, sx: &mut f64, sy: &m
 /// `v+v→v` collapse of SVGO's collapseRepeated. Opposite directions are
 /// kept: `h30h-30` is a visible stroked line drawn there and back, not
 /// nothing. Other commands are never merged (consecutive `l` segments go
-/// to distinct waypoints).
-fn merge_collinear_lines(commands: Vec<PathCmd>) -> Vec<PathCmd> {
+/// to distinct waypoints). Nothing is merged when a marker-mid may apply:
+/// every vertex renders a marker (SVGO `hasMarkerMid`).
+fn merge_collinear_lines(commands: Vec<PathCmd>, has_marker_mid: bool) -> Vec<PathCmd> {
+    if has_marker_mid {
+        return commands;
+    }
     let mut result: Vec<PathCmd> = Vec::with_capacity(commands.len());
     let (mut cx, mut cy) = (0.0f64, 0.0f64); // current point
     let (mut sx, mut sy) = (0.0f64, 0.0f64); // subpath start
@@ -2173,6 +2266,119 @@ mod tests {
             cmds.len() <= 2,
             "zero-length line should be removed: {result}"
         );
+    }
+
+    // --- Rendering context: linecaps and markers (SVGO fixtures 03/37/39) ---
+
+    fn run_doc(input: &str) -> String {
+        let mut doc = parse_svg(input).unwrap();
+        ConvertPathData::default().run(&mut doc);
+        serialize(&doc)
+    }
+
+    fn only_d(output: &str) -> Vec<String> {
+        output
+            .split(" d=\"")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn zero_length_first_segment_kept_with_linecap() {
+        // SVGO convertPathData.03: `M0,0 0,0` with a stroke and a round
+        // linecap renders a dot and becomes `M0 0h0`; with butt caps or no
+        // stroke it collapses to `M0 0`.
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 0,0" stroke="black" stroke-linecap="round"/><path d="M0,0 0,0" stroke="black" stroke-linecap="butt"/><path d="M0,0 0,0" stroke="black"/><path d="M0,0 0,0" stroke-linecap="round"/><path d="M0,0 0,0" stroke="black" stroke-linecap="square"/></svg>"#,
+        );
+        assert_eq!(
+            only_d(&out),
+            ["M0 0h0", "M0 0", "M0 0", "M0 0", "M0 0h0"],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn zero_length_first_segment_kept_with_inherited_or_styled_linecap() {
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" stroke="currentColor"><g stroke-linecap="round"><path d="M0,0 0,0"/></g><path d="M0,0 0,0" style="stroke-linecap:round"/><path d="M0,0 0,0" stroke-linecap="round" style="stroke:none"/></svg>"#,
+        );
+        assert_eq!(only_d(&out), ["M0 0h0", "M0 0h0", "M0 0"], "{out}");
+    }
+
+    #[test]
+    fn stylesheet_makes_linecap_unknown() {
+        // SVGO resolves `.linecap-butt` statically and emits `M0 0`; svgm
+        // treats any stylesheet as dynamic and keeps the segment for both.
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.linecap-round{stroke:black;stroke-linecap:round}.linecap-butt{stroke:black;stroke-linecap:butt}</style><path d="M0,0 0,0" class="linecap-round"/><path d="M0,0 0,0" class="linecap-butt"/></svg>"#,
+        );
+        assert_eq!(only_d(&out), ["M0 0h0", "M0 0h0"], "{out}");
+    }
+
+    #[test]
+    fn zero_length_segment_after_closepath_kept_with_linecap() {
+        // `Z L1 1`: the lineto after closepath is the first draw of an
+        // implicit new subpath starting at (1,1), so with round caps it
+        // renders a dot (SVGO: `m1 1 4 4Zh0`). Without a linecap it goes.
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M1 1 L5 5 Z L1 1" stroke="black" stroke-linecap="round"/><path d="M1 1 L5 5 Z L1 1" stroke="black"/><path d="M1 1 L5 5 Z M1 1 L1 1" stroke="black" stroke-linecap="round"/></svg>"#,
+        );
+        assert_eq!(
+            only_d(&out),
+            ["M1 1 5 5zh0", "M1 1 5 5z", "M1 1 5 5zM1 1h0"],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn svgo_fixture_39_useless_non_first_segment_dropped_despite_linecap() {
+        let out = run_doc(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M 10 50 h 10 v 0" stroke="#00f" stroke-linecap="round" stroke-linejoin="round"/></svg>"##,
+        );
+        assert_eq!(only_d(&out), ["M10 50h10"], "{out}");
+    }
+
+    #[test]
+    fn marker_mid_blocks_h_v_merging() {
+        // SVGO convertPathData.03: every vertex carries a marker.
+        let out = run_doc(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 0,5 0,10" marker-mid="url(#m)"/><path d="M0,0 0,5 0,10"/><g marker-mid="url(#m)"><path d="M0,0 0,5 0,10"/></g><path d="M0,0 0,5 0,10" style="marker-mid:url(#m)"/></svg>"##,
+        );
+        assert_eq!(
+            only_d(&out),
+            ["M0 0v5 5", "M0 0v10", "M0 0v5 5", "M0 0v5 5"],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn marker_mid_from_stylesheet_blocks_h_v_merging() {
+        let out = run_doc(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><style>.marker-mid{marker-mid:url(#m)}</style><path d="M0,0 0,5 0,10" class="marker-mid"/></svg>"##,
+        );
+        assert_eq!(only_d(&out), ["M0 0v5 5"], "{out}");
+    }
+
+    #[test]
+    fn svgo_fixture_37_markers_only_path_gets_z() {
+        // A path that drew something but lost every vertex keeps a `z` so
+        // the marker has a direction; a bare moveto gains nothing.
+        let out = run_doc(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 9"><marker id="a" stroke="red" viewBox="0 0 5 5"><circle cx="2" cy="2" r="1"/></marker><path marker-start="url(#a)" d="M5 5h0"/><path marker-start="url(#a)" d="M5 5"/><path marker-end="url(#a)" d="M5 5l0 0"/><path d="M5 5h0"/></svg>"##,
+        );
+        assert_eq!(only_d(&out), ["M5 5z", "M5 5", "M5 5z", "M5 5"], "{out}");
+    }
+
+    #[test]
+    fn opposite_direction_h_v_not_merged() {
+        // `h5h-5` is a visible out-and-back stroke, not `h0` (SVGO only
+        // collapses same-sign repeats).
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h5h-5" stroke="red"/><path d="M0 0h5h5"/><path d="M0 0v3v-1"/></svg>"#,
+        );
+        assert_eq!(only_d(&out), ["M0 0h5H0", "M0 0h10", "M0 0v3V2"], "{out}");
     }
 
     #[test]

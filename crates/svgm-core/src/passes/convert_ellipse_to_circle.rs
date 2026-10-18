@@ -1,7 +1,9 @@
 use super::{Pass, PassResult};
 use crate::ast::{Attribute, Document, NodeKind};
 
-/// Converts `<ellipse>` to `<circle>` when `rx` equals `ry`.
+/// Converts `<ellipse>` to `<circle>` when `rx` equals `ry`, or when one
+/// radius is `auto` / absent (SVG2: an auto radius takes the other radius'
+/// value, so the ellipse already renders as a circle).
 pub struct ConvertEllipseToCircle;
 
 impl Pass for ConvertEllipseToCircle {
@@ -20,15 +22,19 @@ impl Pass for ConvertEllipseToCircle {
                 _ => continue,
             };
 
-            let rx = elem.attr("rx").unwrap_or("0");
-            let ry = elem.attr("ry").unwrap_or("0");
+            // Absent and "auto" both mean SVG2 auto.
+            let rx = elem.attr("rx").filter(|v| v.trim() != "auto");
+            let ry = elem.attr("ry").filter(|v| v.trim() != "auto");
 
-            // Convert if rx == ry (string comparison, like SVGO)
-            if rx != ry {
-                continue;
-            }
-
-            let r_value = rx.to_string();
+            let r_value = match (rx, ry) {
+                // Both auto: the used value of both is 0 (not rendered).
+                (None, None) => "0".to_string(),
+                (Some(rx), None) => rx.to_string(),
+                (None, Some(ry)) => ry.to_string(),
+                // String comparison, like SVGO.
+                (Some(rx), Some(ry)) if rx == ry => rx.to_string(),
+                _ => continue,
+            };
 
             let node = doc.node_mut(id);
             if let NodeKind::Element(ref mut elem) = node.kind {
@@ -83,10 +89,33 @@ mod tests {
     fn converts_zero_radii() {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><ellipse cx="10" cy="10"/></svg>"#;
         let mut doc = parse(input).unwrap();
-        // Both default to "0", so they're equal
+        // Both auto: used value 0
         assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
         assert!(output.contains("<circle"));
         assert!(output.contains("r=\"0\""));
+    }
+
+    #[test]
+    fn converts_single_radius_svg2_auto() {
+        // SVG2: a missing radius is auto = the other radius -> a circle.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><ellipse cx="10" cy="10" ry="7"/><ellipse cx="1" cy="1" rx="3"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Changed);
+        assert_eq!(
+            serialize(&doc),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><circle cx="10" cy="10" r="7"/><circle cx="1" cy="1" r="3"/></svg>"#
+        );
+    }
+
+    #[test]
+    fn converts_explicit_auto_radius() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><ellipse cx="10" cy="10" rx="auto" ry="7"/><ellipse rx="4" ry="auto"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Changed);
+        assert_eq!(
+            serialize(&doc),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><circle cx="10" cy="10" r="7"/><circle r="4"/></svg>"#
+        );
     }
 }

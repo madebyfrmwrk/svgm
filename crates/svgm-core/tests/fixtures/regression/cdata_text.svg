@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 20">
+  <text x="2" y="15"><![CDATA[a < b & c]]></text>
+  <text x="2" y="18"><tspan><![CDATA[second]]></tspan></text>
+  <text x="2" y="19"><a href="/more"><tspan>read</tspan> <tspan>more</tspan></a></text>
+</svg>

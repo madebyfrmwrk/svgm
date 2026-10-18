@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use super::{INHERITABLE_PROPS, Pass, PassResult, attributes_in_stylesheets};
+use super::{
+    Computed, INHERITABLE_PROPS, Pass, PassResult, attributes_in_stylesheets, computed_style_with,
+    has_stylesheet,
+};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct RemoveUnknownsAndDefaults;
@@ -25,7 +28,9 @@ const DEFAULT_ATTRS: &[(&str, &str)] = &[
     ("opacity", "1"),
     ("visibility", "visible"),
     ("display", "inline"),
-    ("overflow", "visible"),
+    // No ("overflow", "visible"): the UA stylesheet sets overflow:hidden on
+    // svg/image/foreignObject/symbol/marker/pattern, so an explicit
+    // overflow="visible" is not a default there (SVGO has no overflow entry).
     ("clip-rule", "nonzero"),
     ("color-interpolation", "sRGB"),
     ("color-interpolation-filters", "linearRGB"),
@@ -83,25 +88,31 @@ const SKIP_FILL_REMOVAL: &[&str] = &[
     "svg",
 ];
 
-/// Compute the inherited value for each inheritable attribute by walking the
-/// ancestor chain. Returns a map of attr_name → nearest ancestor's value.
-/// Matches SVGO's computeStyle ancestor-walking logic.
-fn compute_inherited_values(doc: &Document, id: NodeId) -> HashMap<String, String> {
+/// Resolve the parent's computed value for every inheritable presentation
+/// attribute present on element `id` (SVGO's `computedParentStyle`). The
+/// parent's `style=""` declarations beat its presentation attributes and the
+/// walk continues through the ancestors, so `<g style="fill:red">` counts as
+/// an ancestor fill even though no `fill` attribute exists.
+///
+/// `dynamic` (the document has a `<style>` sheet) makes every value
+/// [`Computed::Dynamic`]: a rule could target any ancestor, so neither a
+/// default nor an override is provably redundant.
+fn compute_parent_style(doc: &Document, id: NodeId, dynamic: bool) -> HashMap<String, Computed> {
     let mut values = HashMap::new();
-    let mut current = doc.node(id).parent;
-    while let Some(parent_id) = current {
-        if let NodeKind::Element(ref elem) = doc.node(parent_id).kind {
-            for attr in &elem.attributes {
-                if attr.prefix.is_none()
-                    && INHERITABLE_PROPS.contains(&attr.name.as_str())
-                    && !values.contains_key(&attr.name)
-                {
-                    // Nearest ancestor wins — don't overwrite
-                    values.insert(attr.name.clone(), attr.value.clone());
-                }
-            }
+    let NodeKind::Element(ref elem) = doc.node(id).kind else {
+        return values;
+    };
+    let Some(parent) = doc.node(id).parent else {
+        return values;
+    };
+    for attr in &elem.attributes {
+        if attr.prefix.is_none()
+            && INHERITABLE_PROPS.contains(&attr.name.as_str())
+            && !values.contains_key(&attr.name)
+        {
+            let computed = computed_style_with(doc, parent, &attr.name, dynamic);
+            values.insert(attr.name.clone(), computed);
         }
-        current = doc.node(parent_id).parent;
     }
     values
 }
@@ -118,10 +129,16 @@ impl Pass for RemoveUnknownsAndDefaults {
         // removing one would un-match its rule (SVGO #2144), so they are
         // never removed, default value or not.
         let referenced = attributes_in_stylesheets(doc);
+        // A stylesheet can set any inheritable property on any ancestor
+        // (inlineStyles leaves @media / pseudo-class rules in place, and the
+        // safe preset never inlines). SVGO resolves the matching rules; we
+        // conservatively treat every ancestor value as unknown instead.
+        let dynamic = has_stylesheet(doc);
 
         for id in ids {
-            // Phase 1: compute inherited attribute values (immutable borrow)
-            let inherited = compute_inherited_values(doc, id);
+            // Phase 1: compute the parent's style for the attrs we may touch
+            // (immutable borrow)
+            let inherited = compute_parent_style(doc, id, dynamic);
 
             // Phase 2: mutate attributes (mutable borrow)
             let node = doc.node_mut(id);
@@ -175,10 +192,12 @@ impl Pass for RemoveUnknownsAndDefaults {
                     // Check A (SVGO defaultAttrs): remove known defaults
                     if is_default {
                         if is_inheritable {
-                            // Only remove if NO ancestor has this property at all.
-                            // If any ancestor sets it, keep — removing would change
-                            // the inherited value. (Falls through to Check B.)
-                            if !inherited.contains_key(&attr.name) {
+                            // Only remove if NO ancestor has this property at all
+                            // (attribute, style="" declaration, or possibly a
+                            // stylesheet rule). If any ancestor sets it, keep —
+                            // removing would change the inherited value.
+                            // (Falls through to Check B.)
+                            if matches!(inherited.get(&attr.name), None | Some(Computed::Unset)) {
                                 return false;
                             }
                         } else {
@@ -188,8 +207,12 @@ impl Pass for RemoveUnknownsAndDefaults {
                     }
 
                     // Check B (SVGO uselessOverrides): remove attrs that duplicate
-                    // the inherited value (redundant override)
-                    if is_inheritable && inherited.get(&attr.name).is_some_and(|v| *v == attr.value)
+                    // the inherited value (redundant override). Only a statically
+                    // known, non-empty value counts: `style="fill:"` or a
+                    // stylesheet rule leaves the inherited value unknown.
+                    if is_inheritable
+                        && matches!(inherited.get(&attr.name),
+                            Some(Computed::Static(v)) if !v.is_empty() && *v == attr.value)
                     {
                         return false;
                     }
@@ -412,5 +435,127 @@ mod tests {
             output.contains("fill=\"black\""),
             "fill=black should be kept on element with id: {output}"
         );
+    }
+
+    // --- overflow is not a default (UA sets overflow:hidden on svg etc.) ---
+
+    #[test]
+    fn keeps_overflow_visible() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" overflow=\"visible\"><svg overflow=\"visible\"><image overflow=\"visible\" href=\"a.png\"/><foreignObject overflow=\"visible\"><div/></foreignObject></svg></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        let output = serialize(&doc);
+        assert_eq!(
+            output.matches("overflow=\"visible\"").count(),
+            4,
+            "{output}"
+        );
+    }
+
+    // --- ancestor style="" and <style> are part of the cascade ---
+
+    #[test]
+    fn keeps_default_when_ancestor_style_attr_sets_property() {
+        // <g style="fill:red"> makes the black path's fill a real override.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"fill:red\"><path fill=\"black\" d=\"M0 0h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        assert!(serialize(&doc).contains("fill=\"black\""));
+    }
+
+    #[test]
+    fn ancestor_style_attr_beats_presentation_attr_for_override_check() {
+        // The group's style="fill:blue" wins over its fill="red", so the
+        // child's fill="red" is a genuine override, not a useless one.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g fill=\"red\" style=\"fill:blue\"><path fill=\"red\" d=\"M5 5h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        assert_eq!(serialize(&doc).matches("fill=\"red\"").count(), 2);
+    }
+
+    #[test]
+    fn removes_override_matching_ancestor_style_attr() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"fill:blue\"><path fill=\"blue\" d=\"M5 5h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
+        assert!(!serialize(&doc).contains("fill=\"blue\""));
+    }
+
+    #[test]
+    fn keeps_stroke_defaults_when_ancestor_style_attr_sets_stroke() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"stroke:red;stroke-width:3\"><path stroke=\"none\" stroke-width=\"1\" d=\"M0 5h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        let output = serialize(&doc);
+        assert!(output.contains("stroke=\"none\""), "{output}");
+        assert!(output.contains("stroke-width=\"1\""), "{output}");
+    }
+
+    #[test]
+    fn keeps_inheritable_defaults_when_stylesheet_has_dynamic_rules() {
+        // @media / :hover rules may set fill/stroke on the ancestors.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media (prefers-color-scheme:dark){#k{fill:red}} #h:hover{stroke:blue}</style><g id=\"k\"><path fill=\"black\" d=\"M0 0h5v5z\"/></g><g id=\"h\"><path stroke=\"none\" d=\"M0 0h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        let output = serialize(&doc);
+        assert!(output.contains("fill=\"black\""), "{output}");
+        assert!(output.contains("stroke=\"none\""), "{output}");
+    }
+
+    #[test]
+    fn keeps_inheritable_defaults_when_stylesheet_targets_ancestor_class() {
+        // Safe preset never inlines styles: `.x{fill:red}` on the group is
+        // the inherited value, so fill="black" is an override.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.x{fill:red}</style><g class=\"x\"><path fill=\"black\" d=\"M0 0h5v5z\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+        assert!(serialize(&doc).contains("fill=\"black\""));
+    }
+
+    #[test]
+    fn stylesheet_does_not_block_non_inheritable_defaults() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.x{fill:red}</style><rect opacity=\"1\" width=\"1\" height=\"1\"/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
+        assert!(!serialize(&doc).contains("opacity"));
+    }
+
+    #[test]
+    fn empty_ancestor_style_declaration_is_unknown() {
+        // style="fill:" is malformed; neither a default nor an override can
+        // be proven redundant against it.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"fill:\"><path fill=\"black\" d=\"M0 0\"/><path fill=\"\" d=\"M0 0\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(
+            RemoveUnknownsAndDefaults.run(&mut doc),
+            PassResult::Unchanged
+        );
+    }
+
+    #[test]
+    fn ancestor_inherit_keyword_walks_up() {
+        // <g style="fill:inherit"> passes the root's fill="red" through.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" fill=\"red\"><g style=\"fill:inherit\"><path fill=\"red\" d=\"M0 0\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveUnknownsAndDefaults.run(&mut doc), PassResult::Changed);
+        assert_eq!(serialize(&doc).matches("fill=\"red\"").count(), 1);
     }
 }

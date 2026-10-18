@@ -653,7 +653,7 @@ pub(crate) fn split_property(decl: &str) -> Option<(&str, &str)> {
 }
 
 /// Strip a trailing `!important` (any case, any inner whitespace) and trim.
-fn strip_important(value: &str) -> &str {
+pub(crate) fn strip_important(value: &str) -> &str {
     let v = value.trim();
     const KW: &str = "important";
     // Compare on bytes: `v.len() - KW.len()` need not be a char boundary when
@@ -672,13 +672,14 @@ fn strip_important(value: &str) -> &str {
 }
 
 /// Value of `prop` in the element's unprefixed `style` attribute (last
-/// occurrence wins), with a trailing `!important` stripped.
+/// occurrence wins), with a trailing `!important` stripped. Property names
+/// are ASCII case-insensitive (`FILL:red` sets `fill`), as in CSS.
 pub(crate) fn style_declaration(elem: &Element, prop: &str) -> Option<String> {
     let style = elem.attr("style")?;
     let mut found = None;
     for decl in split_declarations(style) {
         if let Some((name, value)) = split_property(decl)
-            && name == prop
+            && name.eq_ignore_ascii_case(prop)
         {
             found = Some(strip_important(value).to_string());
         }
@@ -725,18 +726,20 @@ pub(crate) fn computed_style_with(
     }
     let inheritable = INHERITABLE_PROPS.contains(&prop);
     let mut current = Some(id);
-    let mut first = true;
     while let Some(nid) = current {
         if let Some(e) = elem(doc, nid) {
             let own = style_declaration(e, prop).or_else(|| e.attr(prop).map(str::to_string));
             match own {
+                // Explicit `inherit` takes the parent's computed value: keep
+                // walking (for a non-inheritable property the parent's own
+                // value, or Unset when it has none).
                 Some(v) if v.trim() == "inherit" => {}
                 Some(v) => return Computed::Static(v),
-                None if !first && !inheritable => return Computed::Unset,
+                // A non-inheritable property never comes from an ancestor.
+                None if !inheritable => return Computed::Unset,
                 None => {}
             }
         }
-        first = false;
         current = doc.node(nid).parent;
     }
     Computed::Unset
@@ -1019,6 +1022,13 @@ mod tests {
         let doc = parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#).unwrap();
         let e = elem(&doc, find(&doc, "rect")).unwrap();
         assert_eq!(style_declaration(e, "fill"), None);
+
+        // CSS property names are case-insensitive.
+        let doc =
+            parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="FILL:red"/></svg>"#)
+                .unwrap();
+        let e = elem(&doc, find(&doc, "rect")).unwrap();
+        assert_eq!(style_declaration(e, "fill"), Some("red".to_string()));
     }
 
     #[test]
@@ -1059,6 +1069,23 @@ mod tests {
         assert_eq!(
             computed_style(&doc, find(&doc, "svg"), "fill"),
             Computed::Static("red".into())
+        );
+    }
+
+    #[test]
+    fn non_inheritable_prop_never_comes_from_parent() {
+        // display/opacity on the parent are not the child's computed value
+        // (only an explicit `inherit` reaches up).
+        let doc = parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g display="none" style="opacity:.5"><rect/><circle opacity="inherit"/></g></svg>"#,
+        )
+        .unwrap();
+        let rect = find(&doc, "rect");
+        assert_eq!(computed_style(&doc, rect, "display"), Computed::Unset);
+        assert_eq!(computed_style(&doc, rect, "opacity"), Computed::Unset);
+        assert_eq!(
+            computed_style(&doc, find(&doc, "circle"), "opacity"),
+            Computed::Static(".5".into())
         );
     }
 

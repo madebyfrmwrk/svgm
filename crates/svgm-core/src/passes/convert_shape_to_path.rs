@@ -148,15 +148,15 @@ fn is_path_shorter(elem: &crate::ast::Element, d: &str) -> bool {
 // --- Shape conversion functions ---
 
 fn rect_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String> {
-    let x = parse_attr(elem, "x").unwrap_or(0.0);
-    let y = parse_attr(elem, "y").unwrap_or(0.0);
+    let x = parse_attr(elem, "x")?;
+    let y = parse_attr(elem, "y")?;
     let w = parse_attr(elem, "width")?;
     let h = parse_attr(elem, "height")?;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
 
-    let (rx, ry) = resolve_rect_radii(elem, w, h);
+    let (rx, ry) = resolve_rect_radii(elem, w, h)?;
 
     if approx_eq(rx, 0.0, precision) && approx_eq(ry, 0.0, precision) {
         // Simple rect
@@ -200,28 +200,37 @@ fn rect_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String> 
     }
 }
 
-/// Resolve rx/ry for a rect per SVG spec.
-fn resolve_rect_radii(elem: &crate::ast::Element, w: f64, h: f64) -> (f64, f64) {
-    let rx = parse_attr(elem, "rx");
-    let ry = parse_attr(elem, "ry");
+/// Resolve rx/ry for a rect per SVG spec. `None` when a radius is present
+/// but not a plain number (`rx="10%"`, `rx="1em"`): the conversion is
+/// aborted rather than squaring the corners. `auto` counts as absent.
+fn resolve_rect_radii(elem: &crate::ast::Element, w: f64, h: f64) -> Option<(f64, f64)> {
+    let radius = |name: &str| -> Option<Option<f64>> {
+        match elem.attr(name) {
+            None => Some(None),
+            Some(v) if v.trim() == "auto" => Some(None),
+            Some(v) => parse_svg_number(v).map(Some),
+        }
+    };
+    let rx = radius("rx")?;
+    let ry = radius("ry")?;
 
     let (mut rx, mut ry) = match (rx, ry) {
         (Some(rx), Some(ry)) => (rx, ry),
         (Some(rx), None) => (rx, rx),
         (None, Some(ry)) => (ry, ry),
-        (None, None) => return (0.0, 0.0),
+        (None, None) => return Some((0.0, 0.0)),
     };
 
     // Clamp per SVG spec
     rx = rx.max(0.0).min(w / 2.0);
     ry = ry.max(0.0).min(h / 2.0);
 
-    (rx, ry)
+    Some((rx, ry))
 }
 
 fn circle_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String> {
-    let cx = parse_attr(elem, "cx").unwrap_or(0.0);
-    let cy = parse_attr(elem, "cy").unwrap_or(0.0);
+    let cx = parse_attr(elem, "cx")?;
+    let cy = parse_attr(elem, "cy")?;
     let r = parse_attr(elem, "r")?;
     if r <= 0.0 {
         return None;
@@ -242,8 +251,11 @@ fn circle_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String
 }
 
 fn ellipse_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String> {
-    let cx = parse_attr(elem, "cx").unwrap_or(0.0);
-    let cy = parse_attr(elem, "cy").unwrap_or(0.0);
+    let cx = parse_attr(elem, "cx")?;
+    let cy = parse_attr(elem, "cy")?;
+    // A missing/auto radius is SVG2 "auto" (= the other radius); that case
+    // is convertEllipseToCircle's job, so only fully numeric ellipses are
+    // converted here.
     let rx = parse_attr(elem, "rx")?;
     let ry = parse_attr(elem, "ry")?;
     if rx <= 0.0 || ry <= 0.0 {
@@ -265,10 +277,10 @@ fn ellipse_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<Strin
 }
 
 fn line_to_path_d(elem: &crate::ast::Element, precision: u32) -> Option<String> {
-    let x1 = parse_attr(elem, "x1").unwrap_or(0.0);
-    let y1 = parse_attr(elem, "y1").unwrap_or(0.0);
-    let x2 = parse_attr(elem, "x2").unwrap_or(0.0);
-    let y2 = parse_attr(elem, "y2").unwrap_or(0.0);
+    let x1 = parse_attr(elem, "x1")?;
+    let y1 = parse_attr(elem, "y1")?;
+    let x2 = parse_attr(elem, "x2")?;
+    let y2 = parse_attr(elem, "y2")?;
 
     Some(format!(
         "M{} {}L{} {}",
@@ -377,8 +389,15 @@ fn parse_number_list(s: &str) -> Option<Vec<f64>> {
 
 // --- Helpers ---
 
+/// Numeric value of a geometry attribute. Absent means the SVG default of 0
+/// (`Some(0.0)`); a value that is not a plain number (`25%`, `10mm`, `1em`)
+/// yields `None` so the caller aborts the conversion instead of treating the
+/// coordinate as 0 (mirrors SVGO's `Number.isNaN` guards).
 fn parse_attr(elem: &crate::ast::Element, name: &str) -> Option<f64> {
-    elem.attr(name).and_then(parse_svg_number)
+    match elem.attr(name) {
+        None => Some(0.0),
+        Some(v) => parse_svg_number(v),
+    }
 }
 
 fn approx_eq(a: f64, b: f64, precision: u32) -> bool {
@@ -558,6 +577,68 @@ mod tests {
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Unchanged);
         assert!(output.contains("<circle"));
+    }
+
+    #[test]
+    fn rect_missing_width_skipped() {
+        // width/height absent -> 0 -> not rendered -> nothing to convert.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"1\" height=\"50\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    // --- Unit / percentage coordinates are not numbers ---
+
+    #[test]
+    fn rect_with_percent_or_unit_coords_skipped() {
+        for svg in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"25%\" width=\"100\" height=\"50\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect y=\"10mm\" width=\"100\" height=\"50\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"50%\" height=\"50\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"50\" rx=\"10%\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"50\" ry=\"1em\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"100\" height=\"50\" rx=\"5\" ry=\"10%\"/></svg>",
+        ] {
+            let (result, output) = run_pass(svg);
+            assert_eq!(result, PassResult::Unchanged, "{svg}");
+            assert!(output.contains("<rect"), "{output}");
+        }
+    }
+
+    #[test]
+    fn rect_rx_auto_counts_as_absent() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect rx=\"auto\" ry=\"auto\" x=\"10\" y=\"20\" width=\"100\" height=\"50\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(output.contains("d=\"M10 20h100v50H10z\""), "{output}");
+    }
+
+    #[test]
+    fn line_with_percent_or_unit_coords_skipped() {
+        for svg in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><line x1=\"50%\" y1=\"0\" x2=\"100\" y2=\"50\" stroke=\"red\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><line x1=\"1em\" y1=\"0\" x2=\"100\" y2=\"50\" stroke=\"red\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><line x1=\"0\" y1=\"0\" x2=\"100%\" y2=\"50\" stroke=\"red\"/></svg>",
+        ] {
+            let (result, output) = run_pass(svg);
+            assert_eq!(result, PassResult::Unchanged, "{svg}");
+            assert!(output.contains("<line"), "{output}");
+        }
+    }
+
+    #[test]
+    fn circle_and_ellipse_with_percent_coords_skipped() {
+        // Even with a precision that would make the path shorter, a
+        // percentage centre cannot be converted.
+        for svg in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"50%\" cy=\"50.123456\" r=\"25.123456\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"1\" cy=\"1\" r=\"50%\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><ellipse cx=\"50%\" cy=\"50.123456\" rx=\"25.123456\" ry=\"20.123456\"/></svg>",
+        ] {
+            let (result, output) = run_pass(svg);
+            assert_eq!(result, PassResult::Unchanged, "{svg}");
+            assert!(!output.contains("<path"), "{output}");
+        }
     }
 
     #[test]
