@@ -20,14 +20,20 @@ impl Pass for CleanupIds {
             .filter(|&id| inside_foreign_object(doc, id))
             .collect();
 
-        // Phase 1: Collect all ID declarations
+        // Phase 1: Collect all ID declarations. Ids of foreign elements are
+        // left alone but reserved, so that no SVG id is renamed onto one of
+        // them (`url(#a)` would then resolve to the HTML element).
         let mut declarations: HashMap<String, NodeId> = HashMap::new();
+        let mut reserved: HashSet<String> = HashSet::new();
         for &id in &ids {
-            if !foreign.contains(&id)
-                && let NodeKind::Element(ref elem) = doc.node(id).kind
+            if let NodeKind::Element(ref elem) = doc.node(id).kind
                 && let Some(id_val) = elem.attr("id")
             {
-                declarations.insert(id_val.to_string(), id);
+                if foreign.contains(&id) {
+                    reserved.insert(id_val.to_string());
+                } else {
+                    declarations.insert(id_val.to_string(), id);
+                }
             }
         }
 
@@ -95,7 +101,10 @@ impl Pass for CleanupIds {
         let mut rename_map: HashMap<String, String> = HashMap::new();
 
         for (old_name, _) in &referenced_ids {
-            let new_name = generator.next_id();
+            let mut new_name = generator.next_id();
+            while reserved.contains(&new_name) {
+                new_name = generator.next_id();
+            }
             if new_name != **old_name {
                 rename_map.insert((*old_name).clone(), new_name);
             }
@@ -536,6 +545,39 @@ mod tests {
         assert!(output.contains("url(#a)"), "{output}");
         assert!(output.contains("id=\"html-unused\""), "{output}");
         assert!(output.contains("id=\"para\""), "{output}");
+    }
+
+    #[test]
+    fn generated_ids_skip_names_used_inside_foreign_object() {
+        // The HTML <div id="a"> keeps its id, so the clipPath must not be
+        // renamed to `a`: `url(#a)` would resolve to the <div> (first in
+        // tree order) and the clip would be lost.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\">hi</div></foreignObject><defs><clipPath id=\"clip_long\"><rect width=\"5\" height=\"5\"/></clipPath></defs><rect clip-path=\"url(#clip_long)\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(
+            output.contains("<div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\">"),
+            "{output}"
+        );
+        assert!(output.contains("<clipPath id=\"b\">"), "{output}");
+        assert!(output.contains("clip-path=\"url(#b)\""), "{output}");
+        assert!(!output.contains("clip_long"), "{output}");
+    }
+
+    #[test]
+    fn generated_ids_skip_several_reserved_names() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad_one\"/><linearGradient id=\"grad_two\"/></defs><rect fill=\"url(#grad_one)\" stroke=\"url(#grad_two)\"/><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\"><span id=\"b\">x</span></div></foreignObject></svg>";
+        let (_, output) = run_pass(input);
+        assert!(
+            output.contains("<linearGradient id=\"c\"></linearGradient><linearGradient id=\"d\">"),
+            "{output}"
+        );
+        assert!(
+            output.contains("fill=\"url(#c)\" stroke=\"url(#d)\""),
+            "{output}"
+        );
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("id=\"b\""), "{output}");
     }
 
     #[test]
