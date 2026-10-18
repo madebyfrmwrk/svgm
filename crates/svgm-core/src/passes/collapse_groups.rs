@@ -666,4 +666,38 @@ mod tests {
         let (result, output) = run(input);
         assert_eq!(result, PassResult::Unchanged, "{output}");
     }
+
+    #[test]
+    fn group_declaring_used_namespace_is_kept() {
+        // The declaration scopes the foo:* descendants; neither unwrapping
+        // (no attributes) nor merging into a single child may drop it.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g xmlns:foo="urn:foo"><foo:bar/><rect foo:attr="1"/></g><g xmlns:foo="urn:foo" fill="red"><rect foo:attr="1"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        CollapseGroups.run(&mut doc);
+        let output = serialize(&doc);
+        // Multi-child group: kept as the declaration's scope.
+        assert!(
+            output.contains(r#"<g xmlns:foo="urn:foo"><foo:bar/><rect foo:attr="1"/></g>"#),
+            "{output}"
+        );
+        // Single-child group: may be merged, but the declaration must travel
+        // with the child so every used prefix stays declared.
+        assert_eq!(
+            output.matches("xmlns:foo=\"urn:foo\"").count(),
+            2,
+            "{output}"
+        );
+        assert_eq!(output.matches("foo:attr=\"1\"").count(), 2, "{output}");
+        assert!(output.contains("fill=\"red\""), "{output}");
+    }
+
+    #[test]
+    fn group_with_unused_namespace_is_collapsed_after_cleanup() {
+        // removeUnusedNamespaces strips the unused declaration first, then
+        // the group collapses as usual.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g xmlns:foo="urn:foo"><rect width="1" height="1"/></g></svg>"#;
+        let out = crate::optimize(input).unwrap().data;
+        assert!(!out.contains("<g"), "{out}");
+        assert!(!out.contains("xmlns:foo"), "{out}");
+    }
 }

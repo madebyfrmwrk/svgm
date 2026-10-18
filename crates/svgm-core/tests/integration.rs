@@ -643,3 +643,43 @@ fn transform_url_refs() {
     let again = svgm_core::optimize(&output).unwrap().data;
     assert_eq!(again, output, "not idempotent");
 }
+/// Every `url(#x)` / `href="#x"` reference in `svg` must point at a declared id.
+fn assert_references_resolve(svg: &str) {
+    let mut ids = std::collections::HashSet::new();
+    for piece in svg.split(" id=\"").skip(1) {
+        ids.insert(piece.split('"').next().unwrap().to_string());
+    }
+    let mut refs = Vec::new();
+    for piece in svg.split("url(#").skip(1) {
+        refs.push(
+            piece
+                .split(')')
+                .next()
+                .unwrap()
+                .trim_matches(['\'', '"'])
+                .to_string(),
+        );
+    }
+    for piece in svg.split("href=\"#").skip(1) {
+        refs.push(piece.split('"').next().unwrap().to_string());
+    }
+    assert!(!refs.is_empty(), "no references found in {svg}");
+    for r in refs {
+        assert!(ids.contains(&r), "dangling reference #{r} in {svg}");
+    }
+}
+
+#[test]
+fn regression_defs_nested_wrapper() {
+    // Id-less <g> and nested <defs> wrappers inside <defs> used to be
+    // deleted together with the referenced gradient / clipPaths inside them.
+    let path = Path::new("tests/fixtures/regression/defs_nested_wrapper.svg");
+    let (output, _, _) = optimize_file(path);
+    assert_valid_svg(&output, "defs_nested_wrapper");
+    assert_eq!(output.matches("<linearGradient").count(), 1, "{output}");
+    assert_eq!(output.matches("<clipPath").count(), 2, "{output}");
+    assert!(output.contains("clip-rule=\"evenodd\""), "{output}");
+    assert_references_resolve(&output);
+    let again = svgm_core::optimize(&output).unwrap().data;
+    assert_eq!(again, output, "not idempotent");
+}

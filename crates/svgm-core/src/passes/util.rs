@@ -363,7 +363,7 @@ fn strip_css_comments(css: &str) -> String {
 
 /// Decode CSS backslash escapes in an identifier (`xml\:space` ->
 /// `xml:space`, `\3A ` -> `:`).
-fn unescape_css_ident(s: &str) -> String {
+pub(crate) fn unescape_css_ident(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
