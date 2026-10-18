@@ -612,18 +612,20 @@ pub(crate) fn computed_style_with(
     }
     let inheritable = INHERITABLE_PROPS.contains(&prop);
     let mut current = Some(id);
-    let mut first = true;
     while let Some(nid) = current {
         if let Some(e) = elem(doc, nid) {
             let own = style_declaration(e, prop).or_else(|| e.attr(prop).map(str::to_string));
             match own {
+                // Explicit `inherit` takes the parent's computed value: keep
+                // walking (for a non-inheritable property the parent's own
+                // value, or Unset when it has none).
                 Some(v) if v.trim() == "inherit" => {}
                 Some(v) => return Computed::Static(v),
-                None if !first && !inheritable => return Computed::Unset,
+                // A non-inheritable property never comes from an ancestor.
+                None if !inheritable => return Computed::Unset,
                 None => {}
             }
         }
-        first = false;
         current = doc.node(nid).parent;
     }
     Computed::Unset
@@ -868,6 +870,23 @@ mod tests {
         assert_eq!(
             computed_style(&doc, find(&doc, "svg"), "fill"),
             Computed::Static("red".into())
+        );
+    }
+
+    #[test]
+    fn non_inheritable_prop_never_comes_from_parent() {
+        // display/opacity on the parent are not the child's computed value
+        // (only an explicit `inherit` reaches up).
+        let doc = parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g display="none" style="opacity:.5"><rect/><circle opacity="inherit"/></g></svg>"#,
+        )
+        .unwrap();
+        let rect = find(&doc, "rect");
+        assert_eq!(computed_style(&doc, rect, "display"), Computed::Unset);
+        assert_eq!(computed_style(&doc, rect, "opacity"), Computed::Unset);
+        assert_eq!(
+            computed_style(&doc, find(&doc, "circle"), "opacity"),
+            Computed::Static(".5".into())
         );
     }
 

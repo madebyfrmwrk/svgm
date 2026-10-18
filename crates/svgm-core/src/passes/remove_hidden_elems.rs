@@ -1,13 +1,11 @@
-use super::{Pass, PassResult, animation_targets, has_ancestor, parse_svg_number};
-use crate::ast::{Document, NodeId, NodeKind};
-
-/// Shape elements where fill="none" + stroke="none" means invisible (if leaf).
-const SHAPE_ELEMS: &[&str] = &[
-    "rect", "circle", "ellipse", "path", "line", "polyline", "polygon",
-];
+use super::{
+    Computed, Pass, PassResult, animation_targets, computed_style_with, has_ancestor, has_scripts,
+    has_stylesheet, parse_svg_number,
+};
+use crate::ast::{Document, Element, NodeId, NodeKind};
 
 /// Attributes whose presence means the element may still be visually relevant
-/// even if it appears to have zero geometry or no fill/stroke.
+/// even if it appears to have zero geometry.
 const EFFECT_ATTRS: &[&str] = &[
     "clip-path",
     "mask",
@@ -29,6 +27,13 @@ impl Pass for RemoveHiddenElems {
 
         // Phase 1: Build animation target set.
         let animation_targets = animation_targets(doc);
+
+        // A stylesheet or script may override `display` on any element
+        // (`.a{display:block}` beats display="none"; a :hover rule or a
+        // script may reveal it), so the computed value is unknown while
+        // either exists. inlineStyles runs before this pass and removes
+        // the sheet in the common case.
+        let dynamic = has_stylesheet(doc) || has_scripts(doc);
 
         // Phase 2: Check and remove hidden elements.
         let mut changed = false;
@@ -69,7 +74,7 @@ impl Pass for RemoveHiddenElems {
                 continue;
             }
 
-            if should_remove(doc, nid, elem, name) {
+            if should_remove(doc, nid, elem, name, dynamic) {
                 doc.remove(nid);
                 changed = true;
             }
@@ -84,13 +89,20 @@ impl Pass for RemoveHiddenElems {
 }
 
 /// Determine if an element should be removed based on its properties.
-fn should_remove(doc: &Document, nid: NodeId, elem: &crate::ast::Element, name: &str) -> bool {
-    // display="none" — universally invisible
-    if elem.attr("display") == Some("none") {
+fn should_remove(doc: &Document, nid: NodeId, elem: &Element, name: &str, dynamic: bool) -> bool {
+    // display="none" / style="display:none" — universally invisible. The
+    // computed value accounts for a `style=""` override (`display="none"
+    // style="display:inline"` renders) and is unknown under a stylesheet.
+    // Markers with display:none are still rendered where referenced.
+    if name != "marker"
+        && matches!(computed_style_with(doc, nid, "display", dynamic),
+            Computed::Static(v) if v.trim() == "none")
+    {
         return true;
     }
 
-    // Zero-size geometry checks
+    // Zero-size geometry checks. Only an explicitly numeric zero counts:
+    // a unit or percentage value ("0%", "1em") is left alone.
     match name {
         "rect" => {
             if is_explicit_zero(elem.attr("width")) || is_explicit_zero(elem.attr("height")) {
@@ -106,10 +118,12 @@ fn should_remove(doc: &Document, nid: NodeId, elem: &crate::ast::Element, name: 
             }
         }
         "ellipse" => {
-            // Missing rx or ry = no rendering; explicit ="0" = no rendering
-            let rx = elem.attr("rx");
-            let ry = elem.attr("ry");
-            if rx.is_none() || ry.is_none() || is_zero(rx.unwrap()) || is_zero(ry.unwrap()) {
+            // SVG2: a missing (or "auto") radius takes the other radius'
+            // value, so <ellipse ry="10"> renders as a circle. Only an
+            // explicit zero, or both radii missing, disables rendering.
+            let rx = elem.attr("rx").filter(|v| v.trim() != "auto");
+            let ry = elem.attr("ry").filter(|v| v.trim() != "auto");
+            if (rx.is_none() && ry.is_none()) || is_explicit_zero(rx) || is_explicit_zero(ry) {
                 return true;
             }
         }
@@ -118,30 +132,12 @@ fn should_remove(doc: &Document, nid: NodeId, elem: &crate::ast::Element, name: 
             Some(d) if d.trim().is_empty() => return true,
             _ => {}
         },
-        "line" => {
-            let x1 = parse_coord(elem.attr("x1"));
-            let y1 = parse_coord(elem.attr("y1"));
-            let x2 = parse_coord(elem.attr("x2"));
-            let y2 = parse_coord(elem.attr("y2"));
-            if x1 == x2 && y1 == y2 {
-                return true;
-            }
-        }
         "image"
             if is_explicit_zero(elem.attr("width")) || is_explicit_zero(elem.attr("height")) =>
         {
             return true;
         }
         _ => {}
-    }
-
-    // fill="none" + stroke="none" on leaf shape elements
-    if SHAPE_ELEMS.contains(&name)
-        && elem.attr("fill") == Some("none")
-        && elem.attr("stroke") == Some("none")
-        && !doc.children(nid).any(|_| true)
-    {
-        return true;
     }
 
     false
@@ -158,13 +154,6 @@ fn is_explicit_zero(value: Option<&str>) -> bool {
 /// Check if a string value represents zero.
 fn is_zero(v: &str) -> bool {
     parse_svg_number(v.trim().trim_end_matches("px")) == Some(0.0)
-}
-
-/// Parse a coordinate attribute, defaulting to 0.0 per SVG spec.
-fn parse_coord(value: Option<&str>) -> f64 {
-    value
-        .and_then(|v| parse_svg_number(v.trim().trim_end_matches("px")))
-        .unwrap_or(0.0)
 }
 
 /// Walk up the parent chain to check if this node is inside a <defs> or <symbol>.
@@ -195,6 +184,66 @@ mod tests {
         assert!(output.contains("<circle"));
     }
 
+    #[test]
+    fn removes_style_display_none() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"display:none\" width=\"10\" height=\"10\"/><g style=\"fill:red; display : none ;\"><circle r=\"5\"/></g><circle cx=\"5\" cy=\"5\" r=\"5\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"5\" cy=\"5\" r=\"5\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn keeps_display_none_overridden_by_style_attr() {
+        // style="" beats the presentation attribute: the rect renders.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect display=\"none\" style=\"display:inline\" width=\"10\" height=\"10\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn keeps_display_none_when_stylesheet_may_override() {
+        // .a{display:block} wins over display="none".
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{display:block}</style><rect class=\"a\" display=\"none\" width=\"10\" height=\"10\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn keeps_display_none_when_stylesheet_has_dynamic_rules() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media (hover:hover){.a:hover{display:inline}}</style><rect class=\"a\" display=\"none\" width=\"10\" height=\"10\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn keeps_display_none_when_script_present() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>show()</script><rect display=\"none\" width=\"10\" height=\"10\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn keeps_marker_with_display_none() {
+        // Markers are rendered where referenced regardless of display.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><marker style=\"display:none\"><path d=\"M0 0h1\"/></marker><marker display=\"none\"><path d=\"M0 0h1\"/></marker></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+    }
+
+    #[test]
+    fn display_is_not_inherited_from_group() {
+        // display is not an inherited property; the child itself renders
+        // nothing only because its parent does, which is the parent's
+        // decision (and the parent gets removed as a whole).
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g display=\"none\"><rect width=\"10\" height=\"10\"/></g></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(output, "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
+    }
+
     // --- Zero-size geometry ---
 
     #[test]
@@ -213,6 +262,13 @@ mod tests {
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<rect"));
+    }
+
+    #[test]
+    fn keeps_rect_with_percent_or_unit_size() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"0%\" height=\"10\"/><rect width=\"10\" height=\"1em\"/></svg>";
+        let (result, _) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
     }
 
     #[test]
@@ -249,8 +305,17 @@ mod tests {
     }
 
     #[test]
-    fn removes_ellipse_missing_rx() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><ellipse cx=\"5\" cy=\"5\" ry=\"10\"/></svg>";
+    fn preserves_ellipse_missing_rx_svg2_auto() {
+        // SVG2: rx defaults to auto = ry, so this renders as a circle.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><ellipse cx=\"5\" cy=\"5\" ry=\"10\"/><ellipse cx=\"5\" cy=\"5\" rx=\"10\"/><ellipse rx=\"auto\" ry=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output.matches("<ellipse").count(), 3);
+    }
+
+    #[test]
+    fn removes_ellipse_both_radii_missing() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><ellipse cx=\"5\" cy=\"5\"/><ellipse rx=\"auto\" ry=\"auto\"/></svg>";
         let (result, output) = run_pass(input);
         assert_eq!(result, PassResult::Changed);
         assert!(!output.contains("<ellipse"));
@@ -273,20 +338,14 @@ mod tests {
     }
 
     #[test]
-    fn removes_zero_length_line() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><line x1=\"5\" y1=\"5\" x2=\"5\" y2=\"5\"/></svg>";
+    fn keeps_zero_length_line() {
+        // SVGO has no zero-length line rule: with a round/square linecap
+        // or markers the line renders a dot, and unit coordinates
+        // (x2="100%") are not comparable to numbers anyway.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><line x1=\"5\" y1=\"5\" x2=\"5\" y2=\"5\" stroke=\"red\" stroke-linecap=\"round\"/><line/><line x1=\"50%\" x2=\"50%\"/></svg>";
         let (result, output) = run_pass(input);
-        assert_eq!(result, PassResult::Changed);
-        assert!(!output.contains("<line"));
-    }
-
-    #[test]
-    fn removes_line_default_coords() {
-        // All coordinates default to 0, so x1==x2 && y1==y2
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><line/></svg>";
-        let (result, output) = run_pass(input);
-        assert_eq!(result, PassResult::Changed);
-        assert!(!output.contains("<line"));
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output.matches("<line").count(), 3);
     }
 
     #[test]
@@ -297,22 +356,23 @@ mod tests {
         assert!(!output.contains("<image"));
     }
 
-    // --- fill="none" + stroke="none" ---
+    // --- fill="none" + stroke="none" is NOT a removal rule ---
 
     #[test]
-    fn removes_leaf_shape_no_fill_no_stroke() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"none\" stroke=\"none\" width=\"10\" height=\"10\"/></svg>";
+    fn keeps_leaf_shape_no_fill_no_stroke() {
+        // SVGO only removes these with the opt-in removeNone param: the
+        // shape may be a pointer-events hit area, a clipPath/mask/marker
+        // child, or restyled by CSS.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"none\" stroke=\"none\" width=\"10\" height=\"10\"/><rect fill=\"none\" stroke=\"none\" pointer-events=\"all\" width=\"10\" height=\"10\"/><clipPath><rect fill=\"none\" stroke=\"none\" width=\"10\" height=\"10\"/></clipPath><mask><path fill=\"none\" stroke=\"none\" d=\"M0 0h1\"/></mask><marker><path fill=\"none\" stroke=\"none\" d=\"M0 0h1\"/></marker><rect fill=\"none\" stroke=\"none\" style=\"fill:blue\" width=\"10\" height=\"10\"/></svg>";
         let (result, output) = run_pass(input);
-        assert_eq!(result, PassResult::Changed);
-        assert!(!output.contains("<rect"));
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output.matches("fill=\"none\"").count(), 6);
     }
 
     #[test]
-    fn preserves_shape_no_fill_no_stroke_with_children() {
-        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text fill=\"none\" stroke=\"none\"><tspan>hi</tspan></text></svg>";
+    fn keeps_leaf_shape_no_fill_no_stroke_under_stylesheet() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{fill:red}</style><rect class=\"a\" fill=\"none\" stroke=\"none\" width=\"10\" height=\"10\"/></svg>";
         let (result, _) = run_pass(input);
-        // text is not in SHAPE_ELEMS, so this wouldn't be caught anyway.
-        // But test the children logic with a real case:
         assert_eq!(result, PassResult::Unchanged);
     }
 

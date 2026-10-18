@@ -48,7 +48,6 @@ const PASS_CATALOG: &[(&str, bool, bool)] = &[
     ("removeDesc", false, true),
     ("removeEmptyAttrs", true, true),
     ("removeEmptyText", true, true),
-    ("removeHiddenElems", true, true),
     ("removeUselessDefs", false, true),
     ("removeUselessStrokeAndFill", false, true),
     ("removeEmptyContainers", true, true),
@@ -56,6 +55,9 @@ const PASS_CATALOG: &[(&str, bool, bool)] = &[
     ("cleanupAttrs", true, true),
     ("inlineStyles", false, true),
     ("minifyStyles", true, true),
+    // After inlineStyles/minifyStyles (SVGO order): display:none decisions
+    // need the stylesheet resolved (or inlined) first.
+    ("removeHiddenElems", true, true),
     ("cleanupNumericValues", true, true),
     ("convertColors", true, true),
     ("removeUnknownsAndDefaults", true, true),
@@ -194,11 +196,11 @@ mod tests {
                 "removeEditorData",
                 "removeEmptyAttrs",
                 "removeEmptyText",
-                "removeHiddenElems",
                 "removeEmptyContainers",
                 "removeUnusedNamespaces",
                 "cleanupAttrs",
                 "minifyStyles",
+                "removeHiddenElems",
                 "cleanupNumericValues",
                 "convertColors",
                 "removeUnknownsAndDefaults",
@@ -228,7 +230,6 @@ mod tests {
                 "removeDesc",
                 "removeEmptyAttrs",
                 "removeEmptyText",
-                "removeHiddenElems",
                 "removeUselessDefs",
                 "removeUselessStrokeAndFill",
                 "removeEmptyContainers",
@@ -236,6 +237,7 @@ mod tests {
                 "cleanupAttrs",
                 "inlineStyles",
                 "minifyStyles",
+                "removeHiddenElems",
                 "cleanupNumericValues",
                 "convertColors",
                 "removeUnknownsAndDefaults",
@@ -256,6 +258,23 @@ mod tests {
             ]
         );
         assert_eq!(names.len(), 34);
+    }
+
+    #[test]
+    fn remove_hidden_elems_runs_after_styles_are_resolved() {
+        // SVGO order: display:none decisions must see the inlined/minified
+        // stylesheet, not the raw one.
+        for preset in [Preset::Safe, Preset::Default] {
+            let names = pass_names(&Config {
+                preset,
+                ..Config::default()
+            });
+            let pos = |n: &str| names.iter().position(|&p| p == n).unwrap();
+            assert!(pos("removeHiddenElems") > pos("minifyStyles"), "{preset:?}");
+        }
+        let names = pass_names(&Config::default());
+        let pos = |n: &str| names.iter().position(|&p| p == n).unwrap();
+        assert!(pos("removeHiddenElems") > pos("inlineStyles"));
     }
 
     #[test]
