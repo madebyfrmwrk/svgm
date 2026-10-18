@@ -127,9 +127,11 @@ fn minify_css(css: &str) -> String {
 /// Shorten colour values of colour properties inside declaration blocks.
 ///
 /// Tracks brace depth so a `:` only starts a value inside a block (never in
-/// `.a:hover`), reads the property name back to the previous `;`/`{`, and
-/// only touches [`COLOR_ATTRS`] properties with a replacement that is no
-/// longer than the original (`green` stays `green`, not `#008000`).
+/// `.a:hover`; a selector nested in `@media{...}` is recognised by the `{`
+/// that follows it), reads the property name back to the previous `;`/`{`,
+/// keeps a `!important` suffix, and only touches [`COLOR_ATTRS`] properties
+/// with a replacement that is no longer than the original (`green` stays
+/// `green`, not `#008000`).
 fn shorten_colors_in_css(css: &str) -> String {
     let bytes = css.as_bytes();
     let mut out = String::with_capacity(css.len());
@@ -168,14 +170,25 @@ fn shorten_colors_in_css(css: &str) -> String {
                 let prop = css[prop_start..i].trim();
                 let end = value_end(bytes, i + 1);
                 let value = &css[i + 1..end];
+                if value.contains('{') {
+                    // `@media print{.a:hover{...}}`: a pseudo-class in a
+                    // nested selector, not a declaration.
+                    i += 1;
+                    continue;
+                }
                 let trimmed = value.trim();
+                let (color, suffix) = match trimmed.find('!') {
+                    Some(bang) => (trimmed[..bang].trim_end(), &trimmed[bang..]),
+                    None => (trimmed, ""),
+                };
                 if COLOR_ATTRS.contains(&prop)
-                    && let Some(short) = shorten_color(trimmed)
-                    && short.len() <= trimmed.len()
-                    && short != trimmed
+                    && let Some(short) = shorten_color(color)
+                    && short.len() <= color.len()
+                    && short != color
                 {
                     out.push_str(&css[copied..=i]);
                     out.push_str(&short);
+                    out.push_str(suffix);
                     copied = end;
                 }
                 // `end` sits on the `;`/`}` (or the end of input), which the
@@ -328,6 +341,34 @@ mod tests {
         assert_eq!(
             minify_css("a:not(.x){fill:#FFFFFF;stroke:#000000}"),
             "a:not(.x){fill:#fff;stroke:#000}"
+        );
+    }
+
+    #[test]
+    fn nested_pseudo_class_colon_is_not_a_declaration() {
+        // Inside @media the selector's `:hover` sits at brace depth 1; it
+        // must not swallow the first declaration of the block.
+        let (_, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{.a:hover{fill:#FFFFFF;stroke:#FF0000}}@media (min-width:100px){.a:hover{fill:#FFFFFF}}</style><rect class=\"a\"/></svg>",
+        );
+        assert!(
+            output.contains("@media print{.a:hover{fill:#fff;stroke:red}}"),
+            "{output}"
+        );
+        assert!(
+            output.contains("@media (min-width:100px){.a:hover{fill:#fff}}"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn important_suffix_is_kept() {
+        let (_, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{fill:#FFFFFF!important;stroke:#FF0000 !important}</style><rect class=\"a\"/></svg>",
+        );
+        assert!(
+            output.contains(".a{fill:#fff!important;stroke:red!important}"),
+            "{output}"
         );
     }
 
