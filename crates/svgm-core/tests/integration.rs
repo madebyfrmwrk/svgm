@@ -545,3 +545,30 @@ fn regression_group_style_vs_child_attr() {
         );
     }
 }
+
+#[test]
+fn regression_tspan_word_separator() {
+    let (default, safe) = optimize_fixture_both_presets("tspan_word_separator.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // A whitespace-only <tspan> separates words; only elements with no
+        // children at all are empty (SVGO removeEmptyText parity).
+        assert!(
+            output.contains("read<tspan> </tspan>more"),
+            "{preset}: inter-word tspan must survive: {output}"
+        );
+        assert!(
+            output.contains("<tspan>read</tspan><tspan> </tspan><tspan>more</tspan>"),
+            "{preset}: inter-word tspan between tspans must survive: {output}"
+        );
+        assert!(
+            output.contains("<tspan> </tspan></text>"),
+            "{preset}: whitespace tspan after CDATA must survive: {output}"
+        );
+        assert!(
+            !output.contains("y=\"18\"><tspan></tspan>")
+                && !output.contains("<text x=\"50\" y=\"18\""),
+            "{preset}: text holding only an empty tspan must go: {output}"
+        );
+        assert_eq!(output.matches("<text").count(), 3, "{preset}: {output}");
+    }
+}
