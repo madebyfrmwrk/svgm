@@ -926,9 +926,11 @@ fn remove_redundant(
             'L' => {
                 let (x, y) = (cmd.args[0], cmd.args[1]);
                 // Skip line to same point, unless it is the first draw of a
-                // subpath and a linecap may render it.
+                // subpath and a linecap may render it. A command right after
+                // closepath starts a new subpath at the closed subpath's
+                // start point, so `Z` counts as a subpath start too.
                 if approx_eq(x, cx, precision) && approx_eq(y, cy, precision) {
-                    let is_first_draw = result.last().is_some_and(|p| p.cmd == 'M');
+                    let is_first_draw = result.last().is_some_and(|p| matches!(p.cmd, 'M' | 'Z'));
                     if !(keep_first_zero_draw && is_first_draw) {
                         continue;
                     }
@@ -1512,7 +1514,9 @@ fn merge_consecutive(commands: Vec<PathCmd>, precision: u32, opts: PathOpts) -> 
     let mut kept: Vec<PathCmd> = Vec::with_capacity(result.len());
     for cmd in result {
         if (cmd.cmd == 'h' || cmd.cmd == 'v') && approx_eq(cmd.args[0], 0.0, precision) {
-            let is_first_draw = kept.last().is_some_and(|p| p.cmd == 'M' || p.cmd == 'm');
+            let is_first_draw = kept
+                .last()
+                .is_some_and(|p| matches!(p.cmd, 'M' | 'm' | 'Z' | 'z'));
             if !(opts.keep_first_zero_draw && is_first_draw) {
                 continue;
             }
@@ -2157,6 +2161,21 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.linecap-round{stroke:black;stroke-linecap:round}.linecap-butt{stroke:black;stroke-linecap:butt}</style><path d="M0,0 0,0" class="linecap-round"/><path d="M0,0 0,0" class="linecap-butt"/></svg>"#,
         );
         assert_eq!(only_d(&out), ["M0 0h0", "M0 0h0"], "{out}");
+    }
+
+    #[test]
+    fn zero_length_segment_after_closepath_kept_with_linecap() {
+        // `Z L1 1`: the lineto after closepath is the first draw of an
+        // implicit new subpath starting at (1,1), so with round caps it
+        // renders a dot (SVGO: `m1 1 4 4Zh0`). Without a linecap it goes.
+        let out = run_doc(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M1 1 L5 5 Z L1 1" stroke="black" stroke-linecap="round"/><path d="M1 1 L5 5 Z L1 1" stroke="black"/><path d="M1 1 L5 5 Z M1 1 L1 1" stroke="black" stroke-linecap="round"/></svg>"#,
+        );
+        assert_eq!(
+            only_d(&out),
+            ["M1 1 5 5zh0", "M1 1 5 5z", "M1 1 5 5zM1 1h0"],
+            "{out}"
+        );
     }
 
     #[test]
