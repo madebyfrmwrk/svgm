@@ -496,3 +496,26 @@ fn regression_stroke_fill_inherited() {
     assert!(!default.contains("stroke-width=\"9\""), "{default}");
     assert!(!default.contains("stroke-dasharray=\"3\""), "{default}");
 }
+
+#[test]
+fn regression_feather_info() {
+    // Feather-style icon: the "i" dot is a zero-length line that renders
+    // thanks to the inherited round linecap.
+    let (default, safe) = optimize_fixture_both_presets("feather_info.svg");
+    // Safe preset converts nothing: both lines survive as lines.
+    assert_eq!(safe.matches("<line").count(), 2, "{safe}");
+    assert!(safe.contains("d=\"M4 4l0 0\""), "{safe}");
+    // Default preset: the dot becomes a path that still draws a segment
+    // (`M12 8h0`), and the explicit zero-length path keeps its segment.
+    assert!(
+        default.contains("M12 8h0") || default.contains("x1=\"12\" x2=\"12\" y1=\"8\" y2=\"8\""),
+        "{default}"
+    );
+    assert!(default.contains("M4 4h0"), "{default}");
+    // Markers-only path keeps a direction via `z`; marker-mid blocks the
+    // v+v merge.
+    assert!(default.contains("M5 5z"), "{default}");
+    assert!(default.contains("M0 0v5 5"), "{default}");
+    let again = svgm_core::optimize(&default).unwrap();
+    assert_eq!(again.data, default, "not idempotent");
+}
