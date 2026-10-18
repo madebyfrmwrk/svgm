@@ -80,6 +80,30 @@ impl Document {
         }
     }
 
+    /// Mark only `id` as removed, leaving its children untouched. The caller
+    /// must already have moved the children elsewhere ([`Document::reparent`])
+    /// or removed them: a removed node's descendants are unreachable from the
+    /// tree but still count in [`Document::byte_estimate`].
+    pub fn remove_shallow(&mut self, id: NodeId) {
+        self.nodes[id.index()].removed = true;
+    }
+
+    /// Detach `child` from its current parent (if any) and insert it into
+    /// `new_parent`'s child list at `index` (clamped to the end). Removed
+    /// siblings count toward `index`, exactly as in the raw `children` vec.
+    pub fn reparent(&mut self, child: NodeId, new_parent: NodeId, index: usize) {
+        if let Some(old_parent) = self.nodes[child.index()].parent {
+            let siblings = &mut self.nodes[old_parent.index()].children;
+            if let Some(pos) = siblings.iter().position(|&c| c == child) {
+                siblings.remove(pos);
+            }
+        }
+        let children = &mut self.nodes[new_parent.index()].children;
+        let index = index.min(children.len());
+        children.insert(index, child);
+        self.nodes[child.index()].parent = Some(new_parent);
+    }
+
     /// Iterate over the direct children of a node, skipping removed nodes.
     pub fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes[id.index()]
@@ -212,4 +236,100 @@ impl Attribute {
 pub struct Namespace {
     pub prefix: String,
     pub uri: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn elem(name: &str) -> NodeKind {
+        NodeKind::Element(Element {
+            name: name.to_string(),
+            prefix: None,
+            attributes: Vec::new(),
+            namespaces: Vec::new(),
+        })
+    }
+
+    fn names(doc: &Document, parent: NodeId) -> Vec<String> {
+        doc.children(parent)
+            .map(|c| match &doc.node(c).kind {
+                NodeKind::Element(e) => e.name.clone(),
+                _ => "#text".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remove_shallow_leaves_children_untouched() {
+        let mut doc = Document::new();
+        let g = doc.alloc(elem("g"));
+        let path = doc.alloc(elem("path"));
+        doc.append_child(doc.root, g);
+        doc.append_child(g, path);
+
+        doc.remove_shallow(g);
+        assert!(doc.node(g).removed);
+        assert!(!doc.node(path).removed);
+        assert_eq!(doc.node(g).children, vec![path]);
+        // The subtree is unreachable from the root.
+        assert_eq!(doc.traverse(), vec![doc.root]);
+
+        // Recursive removal, by contrast, marks the whole subtree.
+        let mut doc2 = Document::new();
+        let g2 = doc2.alloc(elem("g"));
+        let p2 = doc2.alloc(elem("path"));
+        doc2.append_child(doc2.root, g2);
+        doc2.append_child(g2, p2);
+        doc2.remove(g2);
+        assert!(doc2.node(p2).removed);
+    }
+
+    #[test]
+    fn reparent_moves_between_parents_at_index() {
+        let mut doc = Document::new();
+        let defs = doc.alloc(elem("defs"));
+        let g = doc.alloc(elem("g"));
+        let a = doc.alloc(elem("a"));
+        let b = doc.alloc(elem("b"));
+        let c = doc.alloc(elem("c"));
+        doc.append_child(doc.root, defs);
+        doc.append_child(defs, a);
+        doc.append_child(defs, g);
+        doc.append_child(g, b);
+        doc.append_child(g, c);
+
+        // Insert before <g>, which sits at index 1.
+        doc.reparent(c, defs, 1);
+        assert_eq!(names(&doc, defs), vec!["a", "c", "g"]);
+        assert_eq!(names(&doc, g), vec!["b"]);
+        assert_eq!(doc.node(c).parent, Some(defs));
+        assert_eq!(doc.node(b).parent, Some(g));
+
+        // An out-of-range index appends.
+        doc.reparent(b, defs, 99);
+        assert_eq!(names(&doc, defs), vec!["a", "c", "g", "b"]);
+        assert!(doc.children(g).next().is_none());
+
+        // Moving within the same parent reorders.
+        doc.reparent(b, defs, 0);
+        assert_eq!(names(&doc, defs), vec!["b", "a", "c", "g"]);
+        assert_eq!(doc.traverse().len(), 6);
+    }
+
+    #[test]
+    fn reparent_then_remove_keeps_moved_nodes() {
+        let mut doc = Document::new();
+        let defs = doc.alloc(elem("defs"));
+        let g = doc.alloc(elem("g"));
+        let path = doc.alloc(elem("path"));
+        doc.append_child(doc.root, defs);
+        doc.append_child(defs, g);
+        doc.append_child(g, path);
+
+        doc.reparent(path, defs, 0);
+        doc.remove(g);
+        assert!(!doc.node(path).removed);
+        assert_eq!(names(&doc, defs), vec!["path"]);
+    }
 }
