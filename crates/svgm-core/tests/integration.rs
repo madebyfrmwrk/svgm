@@ -433,3 +433,50 @@ fn editor_namespaces_by_uri() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+fn optimize_both_presets(input: &str) -> Vec<(svgm_core::Preset, String)> {
+    [svgm_core::Preset::Safe, svgm_core::Preset::Default]
+        .into_iter()
+        .map(|preset| {
+            let config = svgm_core::Config {
+                preset,
+                ..Default::default()
+            };
+            (
+                preset,
+                svgm_core::optimize_with_config(input, &config)
+                    .unwrap()
+                    .data,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn unsafe_deprecated_attrs_survive_both_presets() {
+    // SVGO only removes these with removeDeprecatedAttrs { removeUnsafe }:
+    // xml:space="preserve" changes text layout and requiredFeatures drives
+    // <switch> selection in user agents that still evaluate it.
+    let input = r#"<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 10 10"><switch><text requiredFeatures="http://www.w3.org/TR/SVG11/feature#Text" x="1" y="5">  a  b  </text><text x="1" y="5">fallback</text></switch></svg>"#;
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(
+            output.contains("xml:space=\"preserve\""),
+            "{preset:?}: {output}"
+        );
+        assert!(
+            output.contains("requiredFeatures=\"http://www.w3.org/TR/SVG11/feature#Text\""),
+            "{preset:?}: {output}"
+        );
+    }
+
+    // enable-background on <svg> is owned by cleanupEnableBackground and
+    // must survive (simplified at most) when a filter uses BackgroundImage.
+    let input = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" enable-background="new 0 0 10 10"><filter id="f"><feBlend in="BackgroundImage" in2="SourceGraphic"/></filter><rect width="10" height="10" fill="red"/><rect width="5" height="5" filter="url(#f)"/></svg>"##;
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(
+            output.contains("enable-background=\"new"),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("BackgroundImage"), "{preset:?}: {output}");
+    }
+}

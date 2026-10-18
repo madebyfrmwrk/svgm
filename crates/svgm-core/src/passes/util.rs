@@ -390,14 +390,35 @@ fn unescape_css_ident(s: &str) -> String {
     out
 }
 
+/// At-rules whose block holds declarations (or keyframe blocks), not rules;
+/// `[` inside them is never an attribute selector. Any other at-rule
+/// (`@media`, `@supports`, `@layer`, `@container`, unknown ones ...) is
+/// treated as a conditional group whose body holds more rules.
+const DECLARATION_AT_RULES: &[&str] = &[
+    "font-face",
+    "page",
+    "keyframes",
+    "counter-style",
+    "property",
+    "font-feature-values",
+    "font-palette-values",
+    "color-profile",
+    "view-transition",
+];
+
 /// Attribute names used in attribute selectors (`[fill=black]`,
 /// `text[xml\:space]`) across all `<style>` elements. Only `[` in selector
-/// position counts: outside `{}` blocks and outside string literals.
+/// position counts: outside declaration blocks (but inside conditional group
+/// rules such as `@media { ... }`) and outside string literals.
 pub(crate) fn attributes_in_stylesheets(doc: &Document) -> HashSet<String> {
     let css = strip_css_comments(&stylesheet_text(doc));
     let mut out = HashSet::new();
     let chars: Vec<char> = css.chars().collect();
-    let mut depth = 0usize;
+    // One entry per open `{`: true when the block's body holds rules (so
+    // selectors may appear), false for a declaration block.
+    let mut blocks: Vec<bool> = Vec::new();
+    // Start of the current prelude (selector or at-rule text).
+    let mut prelude_start = 0usize;
     let mut quote: Option<char> = None;
     let mut i = 0;
     while i < chars.len() {
@@ -413,11 +434,41 @@ pub(crate) fn attributes_in_stylesheets(doc: &Document) -> HashSet<String> {
             i += 1;
             continue;
         }
+        let in_rule_position = blocks.last().copied().unwrap_or(true);
         match c {
             '"' | '\'' => quote = Some(c),
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            '[' if depth == 0 => {
+            '{' => {
+                let prelude: String = chars[prelude_start..i].iter().collect();
+                let holds_rules = in_rule_position
+                    && match prelude.trim_start().strip_prefix('@') {
+                        Some(at_rule) => {
+                            let name: String = at_rule
+                                .chars()
+                                .take_while(|&ch| is_css_ident_char(ch))
+                                .collect();
+                            // Vendor prefixes: @-webkit-keyframes
+                            let name = name.trim_start_matches('-');
+                            let name = name
+                                .split_once('-')
+                                .filter(|(vendor, _)| {
+                                    matches!(*vendor, "webkit" | "moz" | "ms" | "o")
+                                })
+                                .map_or(name, |(_, rest)| rest);
+                            !DECLARATION_AT_RULES.contains(&name)
+                        }
+                        // A style rule: its block holds declarations.
+                        None => false,
+                    };
+                blocks.push(holds_rules);
+                prelude_start = i + 1;
+            }
+            '}' => {
+                blocks.pop();
+                prelude_start = i + 1;
+            }
+            // Ends a statement at-rule such as `@import url(x);`.
+            ';' => prelude_start = i + 1,
+            '[' if in_rule_position => {
                 let mut j = i + 1;
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
@@ -917,6 +968,41 @@ mod tests {
         );
         assert_eq!(attrs(r"a[xml\3A space]{}"), set(&["xml:space"]));
         assert_eq!(attrs("a[fill"), set(&["fill"]));
+    }
+
+    #[test]
+    fn attributes_in_stylesheets_sees_through_conditional_at_rules() {
+        let attrs = |css: &str| {
+            let svg =
+                format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><style>{css}</style></svg>"#);
+            attributes_in_stylesheets(&parse(&svg).unwrap())
+        };
+        let set =
+            |items: &[&str]| -> HashSet<String> { items.iter().map(|s| s.to_string()).collect() };
+        // Conditional group rules hold more rules.
+        assert_eq!(attrs("@media (max-width:1px){[fill]{}}"), set(&["fill"]));
+        assert_eq!(
+            attrs(r"@supports (x:y){@media print{text[xml\:space]{stroke:red}}}[a]{}"),
+            set(&["xml:space", "a"])
+        );
+        assert_eq!(
+            attrs("@layer base{[b]{}} @unknown x{[c]{}}"),
+            set(&["b", "c"])
+        );
+        // Statement at-rules end at `;`.
+        assert_eq!(attrs("@import url(x);@charset 'u';[z]{}"), set(&["z"]));
+        // Declaration at-rules and declaration blocks never hold selectors.
+        assert_eq!(
+            attrs("@font-face{src:url([x])} a{grid-template-columns:[full-start] 1fr}"),
+            set(&[])
+        );
+        assert_eq!(
+            attrs("@keyframes k{from{opacity:[x]}} @-webkit-keyframes j{to{[y]:1}} b[y]{}"),
+            set(&["y"])
+        );
+        // Unbalanced braces do not panic or leak.
+        assert_eq!(attrs("a{}}}[b]{}"), set(&["b"]));
+        assert_eq!(attrs("@media x{a{"), set(&[]));
     }
 
     #[test]
