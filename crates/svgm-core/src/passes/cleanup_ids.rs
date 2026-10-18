@@ -302,8 +302,11 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// Parse the body of a `url(` reference starting at byte `j` (just after the
 /// opening parenthesis): optional whitespace, optional quote, `#`, the id,
-/// the matching quote or `)`. Returns the byte range of the raw id.
-fn url_ref_at(b: &[u8], mut j: usize) -> Option<Range<usize>> {
+/// the matching quote or `)`. Returns the byte range of the raw id and the
+/// offset to resume scanning from: just past the closing `)` when present,
+/// otherwise just past the closing quote (never *on* it, or a scanner that
+/// skips string literals would swallow the rest of the text).
+fn url_ref_at(b: &[u8], mut j: usize) -> Option<(Range<usize>, usize)> {
     while j < b.len() && b[j].is_ascii_whitespace() {
         j += 1;
     }
@@ -326,13 +329,23 @@ fn url_ref_at(b: &[u8], mut j: usize) -> Option<Range<usize>> {
     if end >= b.len() {
         return None; // unterminated
     }
+    let mut resume = end + 1;
+    if quote.is_some() {
+        let mut k = resume;
+        while k < b.len() && b[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if b.get(k) == Some(&b')') {
+            resume = k + 1;
+        }
+    }
     let mut id_end = end;
     if quote.is_none() {
         while id_end > start && b[id_end - 1].is_ascii_whitespace() {
             id_end -= 1;
         }
     }
-    (id_end > start).then_some(start..id_end)
+    (id_end > start).then_some((start..id_end, resume))
 }
 
 /// Call `f` with the raw id range of every `url(#id)` / `url('#id')` /
@@ -342,8 +355,8 @@ fn scan_url_refs(text: &str, mut f: impl FnMut(Range<usize>)) {
     let mut i = 0;
     while i + 4 <= b.len() {
         if b[i..i + 4].eq_ignore_ascii_case(b"url(") && (i == 0 || !is_ident_byte(b[i - 1])) {
-            if let Some(r) = url_ref_at(b, i + 4) {
-                i = r.end;
+            if let Some((r, next)) = url_ref_at(b, i + 4) {
+                i = next;
                 f(r);
             } else {
                 i += 4;
@@ -372,17 +385,24 @@ fn extract_href_ref(value: &str) -> Option<String> {
     }
 }
 
+/// Byte offset of the `.` separating an id from an event or sync-base name
+/// in one SMIL timing term (`id.click`, `id.end+2s`). Mirrors SVGO's
+/// `/(\w+)\.[a-zA-Z]/`: the id must be non-empty and the character after
+/// the dot alphabetic, so clock values like `1.5s` are not references.
+fn smil_ref_dot(term: &str) -> Option<usize> {
+    let dot = term.find('.')?;
+    let after = *term.as_bytes().get(dot + 1)?;
+    (dot > 0 && after.is_ascii_alphabetic()).then_some(dot)
+}
+
 /// Extract id candidates from SMIL timing values like `id.click`,
 /// `0;id.end+2s`.
 fn extract_smil_refs(value: &str) -> Vec<String> {
     let mut refs = Vec::new();
     for part in value.split(';') {
         let trimmed = part.trim();
-        if let Some(dot_pos) = trimmed.find('.') {
-            let candidate = &trimmed[..dot_pos];
-            if !candidate.is_empty() {
-                refs.push(candidate.to_string());
-            }
+        if let Some(dot_pos) = smil_ref_dot(trimmed) {
+            refs.push(trimmed[..dot_pos].to_string());
         }
     }
     refs
@@ -488,8 +508,8 @@ fn css_id_refs(text: &str) -> Vec<(Range<usize>, String)> {
                     && b[i..i + 4].eq_ignore_ascii_case(b"url(")
                     && (i == 0 || !is_ident_byte(b[i - 1]))
                 {
-                    if let Some(r) = url_ref_at(b, i + 4) {
-                        i = r.end;
+                    if let Some((r, next)) = url_ref_at(b, i + 4) {
+                        i = next;
                         out.push((r.clone(), percent_decode(&text[r])));
                     } else {
                         i += 4;
@@ -552,7 +572,7 @@ fn replace_smil_refs(value: &str, rename_map: &HashMap<String, String>) -> Strin
 
     for part in parts {
         let trimmed = part.trim();
-        if let Some(dot_pos) = trimmed.find('.') {
+        if let Some(dot_pos) = smil_ref_dot(trimmed) {
             let candidate = &trimmed[..dot_pos];
             if let Some(new_name) = rename_map.get(candidate) {
                 new_parts.push(format!("{new_name}{}", &trimmed[dot_pos..]));
@@ -680,6 +700,53 @@ mod tests {
         assert!(extract_url_refs("url(#a").is_empty());
         assert!(extract_url_refs("url(data:x)").is_empty());
         assert!(extract_url_refs("url('#a)").is_empty());
+    }
+
+    #[test]
+    fn url_scanner_resumes_after_quoted_reference() {
+        // Scanning must continue past the closing quote/paren, not on it.
+        assert_eq!(
+            extract_url_refs("url('#a') url(\"#b\") url( '#c' ) url(#d)"),
+            vec!["a", "b", "c", "d"]
+        );
+        let m = map(&[("a", "x"), ("b", "y")]);
+        assert_eq!(
+            replace_url_refs("url('#a') url(\"#b\")", &m),
+            "url('#x') url(\"#y\")"
+        );
+    }
+
+    #[test]
+    fn css_scanner_resumes_after_quoted_url() {
+        // Regression: after a quoted url() the scanner used to land on the
+        // closing quote and skip everything up to the next quote, losing
+        // every later url() reference and #id selector.
+        let ids =
+            |css: &str| -> Vec<String> { css_id_refs(css).into_iter().map(|(_, s)| s).collect() };
+        assert_eq!(
+            ids(".a{fill:url('#g1')}.b{fill:url(\"#g2\")}#k:hover{}"),
+            vec!["g1", "g2", "k"]
+        );
+        assert_eq!(
+            ids(".a{fill:url(\"#g1\")}#k:hover{opacity:.5}"),
+            vec!["g1", "k"]
+        );
+        assert_eq!(ids(".a{fill:url( '#g1' )}#k{}"), vec!["g1", "k"]);
+        // A string after the url is still a string.
+        assert_eq!(
+            ids(".a{fill:url('#g1')}.b{content:'#s'}#k{}"),
+            vec!["g1", "k"]
+        );
+    }
+
+    #[test]
+    fn smil_clock_values_are_not_references() {
+        assert!(extract_smil_refs("1.5s").is_empty());
+        assert!(extract_smil_refs("0;2.25s").is_empty());
+        assert_eq!(extract_smil_refs("0;a.end+1.5s"), vec!["a"]);
+        assert_eq!(extract_smil_refs("a.click;b.end"), vec!["a", "b"]);
+        let m = map(&[("1", "a")]);
+        assert_eq!(replace_smil_refs("1.5s", &m), "1.5s");
     }
 
     #[test]
@@ -1111,6 +1178,36 @@ mod tests {
         let (_, out_b) = run_pass(b);
         assert!(out_a.contains("fill=\"url(#a)\""), "{out_a}");
         assert!(out_b.contains("fill=\"url(#a)\""), "{out_b}");
+    }
+
+    #[test]
+    fn two_quoted_css_urls_then_selector_all_renamed() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a:hover{fill:url('#g1')}.b:hover{fill:url(\"#g2\")}#k:hover{opacity:.5}</style><defs><linearGradient id=\"g1\"><stop/></linearGradient><linearGradient id=\"g2\"><stop/></linearGradient></defs><rect class=\"a\" width=\"10\" height=\"10\"/><rect class=\"b\" width=\"10\" height=\"10\"/><rect id=\"k\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a:hover{fill:url('#a')}.b:hover{fill:url(\"#b\")}#c:hover{opacity:.5}</style><defs><linearGradient id=\"a\"><stop/></linearGradient><linearGradient id=\"b\"><stop/></linearGradient></defs><rect class=\"a\" width=\"10\" height=\"10\"/><rect class=\"b\" width=\"10\" height=\"10\"/><rect id=\"c\" width=\"10\" height=\"10\"/></svg>"
+        );
+        // Through the whole pipeline both gradients must survive.
+        let out = crate::optimize(input).unwrap().data;
+        assert!(out.contains("url('#a')"), "{out}");
+        assert!(out.contains("url(\"#b\")"), "{out}");
+        assert!(out.contains("#c:hover"), "{out}");
+        assert!(out.contains("id=\"a\""), "{out}");
+        assert!(out.contains("id=\"b\""), "{out}");
+        assert!(out.contains("id=\"c\""), "{out}");
+    }
+
+    #[test]
+    fn smil_decimal_begin_is_left_alone() {
+        // `begin="1.5s"` is a clock value, not a reference to id="1"; the
+        // unreferenced id goes and the timing stays intact.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"1\" width=\"10\" height=\"10\"/><rect width=\"5\" height=\"5\"><animate attributeName=\"x\" begin=\"1.5s\" dur=\"1s\"/></rect></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(!output.contains("id="), "{output}");
+        assert!(output.contains("begin=\"1.5s\""), "{output}");
     }
 
     #[test]
