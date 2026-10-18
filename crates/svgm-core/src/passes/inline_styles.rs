@@ -5,7 +5,9 @@
 //! Only simple selectors (`rect`, `.a`, `#x`, `rect.a.b#x`, comma lists of
 //! those) are understood. Everything else is "unsupported": such rules are
 //! preserved verbatim, never inlined and never removed, and they constrain
-//! what the supported rules may do (see [`decide_target`]).
+//! what the supported rules may do (see [`decide_target`]). Their exact
+//! specificity is computed per CSS Selectors 4 ([`selector_specificity`]);
+//! a selector that cannot be understood blocks every rule it competes with.
 
 use super::{
     Pass, PassResult, attributes_in_stylesheets, has_scripts, inside_foreign_object,
@@ -126,11 +128,14 @@ enum Target {
     Blocked,
 }
 
-/// Declarations of a rule that has at least one unsupported selector part,
-/// with an upper bound of that rule's specificity.
-struct UnsupportedRule {
+/// A selector part that stays in the stylesheet and may match any element:
+/// an unsupported part, or (when scripts are present) a supported part that
+/// matches nothing yet. Carries the exact specificity of the part (`None`
+/// when the selector is not understood) and its rule's declarations with
+/// their `!important` flags.
+struct KeptPart {
     rule_idx: usize,
-    spec: Specificity,
+    spec: Option<Specificity>,
     decls: Vec<(String, bool)>,
 }
 
@@ -290,27 +295,33 @@ impl Pass for InlineStyles {
                 })
                 .collect();
 
-            let unsupported: Vec<UnsupportedRule> = rules
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, rule)| {
-                    let spec = rule
-                        .parts
-                        .iter()
-                        .filter(|p| p.parsed.is_none())
-                        .map(|p| estimate_specificity(&p.text))
-                        .max()?;
-                    Some(UnsupportedRule {
+            // Every part that survives in the sheet, one entry per part so
+            // that a list like `svg path, g :hover` ranks each alternative on
+            // its own (which one matches a given element is unknown).
+            let mut kept: Vec<KeptPart> = Vec::new();
+            for (idx, rule) in rules.iter().enumerate() {
+                let decls: Vec<(String, bool)> = rule
+                    .declarations
+                    .iter()
+                    .map(|(p, v)| (p.clone(), is_important(v)))
+                    .collect();
+                for part in &rule.parts {
+                    let spec = match &part.parsed {
+                        None => selector_specificity(&part.text),
+                        // Unmatched but kept (scripts may add matching
+                        // elements or classes later).
+                        Some(sel) if !part.removed && part.matched.is_empty() => {
+                            Some(sel.specificity())
+                        }
+                        Some(_) => continue,
+                    };
+                    kept.push(KeptPart {
                         rule_idx: idx,
                         spec,
-                        decls: rule
-                            .declarations
-                            .iter()
-                            .map(|(p, v)| (p.clone(), is_important(v)))
-                            .collect(),
-                    })
-                })
-                .collect();
+                        decls: decls.clone(),
+                    });
+                }
+            }
 
             // Highest specificity first; for equal specificity the later
             // rule wins, so it is applied first. First writer wins per
@@ -350,7 +361,7 @@ impl Pass for InlineStyles {
                     continue;
                 }
                 for (di, (prop, val)) in rule.declarations.iter().enumerate() {
-                    let target = decide_target(prop, val, ri, spec, &unsupported, &attr_selected);
+                    let target = decide_target(prop, val, ri, spec, &kept, &attr_selected);
                     for &nid in &part.matched {
                         let settled = written.entry(nid).or_default();
                         if settled.contains(prop) {
@@ -526,19 +537,20 @@ fn declares(declared: &str, prop: &str) -> bool {
 
 /// Decide how a declaration of a supported rule may be inlined.
 ///
-/// Unsupported rules that set the same property stay in the stylesheet. If
-/// every such rule outranks ours (higher specificity, same specificity but
-/// later, or `!important`) a presentation attribute keeps the cascade intact:
-/// they beat it, as they beat our rule. If every such rule ranks below ours a
+/// Kept parts that set the same property stay in the stylesheet. If every
+/// such part outranks ours (higher specificity, same specificity but later,
+/// or `!important`) a presentation attribute keeps the cascade intact: they
+/// beat it, as they beat our rule. If every such part ranks below ours a
 /// `style` attribute does: it beats them, as our rule did. A mix of the two
-/// (or an attribute selector on the property, a non-presentation property, or
-/// `!important`) cannot be represented, so the declaration stays.
+/// (or a part whose specificity is unknown, an attribute selector on the
+/// property, a non-presentation property, or `!important`) cannot be
+/// represented, so the declaration stays.
 fn decide_target(
     prop: &str,
     val: &str,
     rule_idx: usize,
     spec: Specificity,
-    unsupported: &[UnsupportedRule],
+    kept: &[KeptPart],
     attr_selected: &HashSet<String>,
 ) -> Target {
     if is_important(val) || !PRESENTATION_ATTRS.contains(&prop) || attr_selected.contains(prop) {
@@ -546,16 +558,19 @@ fn decide_target(
     }
     let mut higher = false;
     let mut lower = false;
-    for u in unsupported {
+    for k in kept {
         // Other parts of the same rule carry the same values.
-        if u.rule_idx == rule_idx {
+        if k.rule_idx == rule_idx {
             continue;
         }
-        for (declared, important) in &u.decls {
+        for (declared, important) in &k.decls {
             if !declares(declared, prop) {
                 continue;
             }
-            if *important || u.spec > spec || (u.spec == spec && u.rule_idx > rule_idx) {
+            let Some(kspec) = k.spec else {
+                return Target::Blocked;
+            };
+            if *important || kspec > spec || (kspec == spec && k.rule_idx > rule_idx) {
                 higher = true;
             } else {
                 lower = true;
@@ -664,8 +679,8 @@ fn parse_css(css: &str) -> Option<Vec<CssItem>> {
         let close = find_matching_brace(input, open)?;
         let declarations = parse_declarations(input[open + 1..close].trim());
 
-        let parts: Vec<SelectorPart> = selector
-            .split(',')
+        let parts: Vec<SelectorPart> = split_selector_list(selector)
+            .into_iter()
             .map(|p| {
                 let text = p.trim().to_string();
                 SelectorPart {
@@ -902,92 +917,225 @@ fn extract_class_names(selector: &str) -> Vec<String> {
     out
 }
 
-/// Pseudo-classes whose own name adds nothing to specificity.
-const LOGICAL_PSEUDOS: &[&str] = &["not", "is", "where", "has", "matches", "any"];
-
-/// Upper bound of the specificity of an arbitrary selector (the maximum
-/// over its comma-separated parts). Over-counts rather than under-counts:
-/// `:where()` arguments and every alternative inside `:is()` are counted.
-fn estimate_specificity(selector: &str) -> Specificity {
-    let mut best = (0, 0, 0);
-    for part in selector.split(',') {
-        let chars: Vec<char> = part.chars().collect();
-        let mut spec = (0, 0, 0);
-        let mut i = 0;
-        while i < chars.len() {
-            match chars[i] {
-                '#' => {
-                    i += 1;
-                    read_ident(&chars, &mut i);
-                    spec.0 += 1;
+/// Split a selector list at the commas between its complex selectors,
+/// leaving commas inside `:is(a, b)`, `[attr="x,y"]` and strings alone.
+fn split_selector_list(selector: &str) -> Vec<&str> {
+    let bytes = selector.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut parens = 0u32;
+    let mut brackets = 0u32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 1;
+            } else if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'\\' => i += 1,
+                b'"' | b'\'' => quote = Some(b),
+                b'(' => parens += 1,
+                b')' => parens = parens.saturating_sub(1),
+                b'[' => brackets += 1,
+                b']' => brackets = brackets.saturating_sub(1),
+                b',' if parens == 0 && brackets == 0 => {
+                    out.push(&selector[start..i]);
+                    start = i + 1;
                 }
-                '.' => {
-                    i += 1;
-                    read_ident(&chars, &mut i);
-                    spec.1 += 1;
-                }
-                '[' => {
-                    let mut quote: Option<char> = None;
-                    i += 1;
-                    while i < chars.len() {
-                        let c = chars[i];
-                        if let Some(q) = quote {
-                            if c == '\\' {
-                                i += 1;
-                            } else if c == q {
-                                quote = None;
-                            }
-                        } else if c == '"' || c == '\'' {
-                            quote = Some(c);
-                        } else if c == ']' {
-                            break;
-                        }
-                        i += 1;
-                    }
-                    i += 1;
-                    spec.1 += 1;
-                }
-                ':' => {
-                    i += 1;
-                    let pseudo_element = chars.get(i) == Some(&':');
-                    if pseudo_element {
-                        i += 1;
-                    }
-                    let name = read_ident(&chars, &mut i).unwrap_or_default();
-                    if pseudo_element {
-                        spec.2 += 1;
-                    } else if !LOGICAL_PSEUDOS.contains(&name.as_str()) {
-                        spec.1 += 1;
-                        // Skip the argument of e.g. `:nth-child(2n+1)`.
-                        if chars.get(i) == Some(&'(') {
-                            let mut depth = 0;
-                            while i < chars.len() {
-                                match chars[i] {
-                                    '(' => depth += 1,
-                                    ')' => {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            i += 1;
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                i += 1;
-                            }
-                        }
-                    }
-                }
-                c if c == '\\' || is_css_ident_char(c) => {
-                    read_ident(&chars, &mut i);
-                    spec.2 += 1;
-                }
-                _ => i += 1,
+                _ => {}
             }
         }
-        best = best.max(spec);
+        i += 1;
     }
-    best
+    out.push(&selector[start..]);
+    out
+}
+
+/// Pseudo-classes whose argument is a selector list and whose specificity
+/// is that of their most specific alternative; the name itself adds nothing.
+const LOGICAL_PSEUDOS: &[&str] = &[
+    "is",
+    "not",
+    "has",
+    "matches",
+    "any",
+    "-webkit-any",
+    "-moz-any",
+];
+
+/// Functional pseudo-classes counting (0,1,0) whose argument is not a
+/// selector list.
+const PLAIN_FUNCTIONAL_PSEUDOS: &[&str] =
+    &["nth-of-type", "nth-last-of-type", "lang", "dir", "state"];
+
+/// Pseudo-elements that may be written with a single colon.
+const LEGACY_PSEUDO_ELEMENTS: &[&str] = &["before", "after", "first-line", "first-letter"];
+
+/// Index of the `)` matching the `(` at `open`, honouring quotes.
+fn matching_paren(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    let mut i = open;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '\\' => i += 1,
+                '"' | '\'' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Index just past the `]` closing the attribute selector at `open`.
+fn skip_attribute_selector(chars: &[char], open: usize) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut i = open + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '\\' => i += 1,
+                '"' | '\'' => quote = Some(c),
+                ']' => return Some(i + 1),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn add_specificity(a: Specificity, b: Specificity) -> Specificity {
+    (a.0 + b.0, a.1 + b.1, a.2 + b.2)
+}
+
+/// Specificity of a selector list: that of its most specific alternative.
+/// `None` when any alternative is not understood.
+fn selector_list_specificity(list: &str) -> Option<Specificity> {
+    let mut best = (0, 0, 0);
+    for part in split_selector_list(list) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        best = best.max(selector_specificity(part)?);
+    }
+    Some(best)
+}
+
+/// Exact specificity of one complex selector per CSS Selectors 4, or `None`
+/// when the selector is not understood (unknown functional pseudo-class,
+/// nesting, stray punctuation). Never an estimate: the cascade decisions in
+/// [`decide_target`] are only safe when this is exact.
+fn selector_specificity(selector: &str) -> Option<Specificity> {
+    let chars: Vec<char> = selector.trim().chars().collect();
+    let mut spec = (0, 0, 0);
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '#' => {
+                i += 1;
+                read_ident(&chars, &mut i)?;
+                spec.0 += 1;
+            }
+            '.' => {
+                i += 1;
+                read_ident(&chars, &mut i)?;
+                spec.1 += 1;
+            }
+            '[' => {
+                i = skip_attribute_selector(&chars, i)?;
+                spec.1 += 1;
+            }
+            ':' => {
+                i += 1;
+                let pseudo_element = chars.get(i) == Some(&':');
+                if pseudo_element {
+                    i += 1;
+                }
+                let name = read_ident(&chars, &mut i)?.to_ascii_lowercase();
+                let arg: Option<String> = if chars.get(i) == Some(&'(') {
+                    let close = matching_paren(&chars, i)?;
+                    let a = chars[i + 1..close].iter().collect();
+                    i = close + 1;
+                    Some(a)
+                } else {
+                    None
+                };
+                if pseudo_element {
+                    // `::slotted(S)`, `::part(x)` are not understood.
+                    if arg.is_some() {
+                        return None;
+                    }
+                    spec.2 += 1;
+                } else if LOGICAL_PSEUDOS.contains(&name.as_str()) {
+                    spec = add_specificity(spec, selector_list_specificity(&arg?)?);
+                } else if name == "where" {
+                    arg?;
+                } else if name == "nth-child" || name == "nth-last-child" {
+                    let a = arg?;
+                    spec.1 += 1;
+                    // `:nth-child(An+B of S)` adds the specificity of S.
+                    if let Some(pos) = a.to_ascii_lowercase().find(" of ") {
+                        spec = add_specificity(spec, selector_list_specificity(&a[pos + 4..])?);
+                    }
+                } else if PLAIN_FUNCTIONAL_PSEUDOS.contains(&name.as_str()) {
+                    arg?;
+                    spec.1 += 1;
+                } else if arg.is_some() {
+                    // Unknown functional pseudo-class (`:host(S)`, ...).
+                    return None;
+                } else if LEGACY_PSEUDO_ELEMENTS.contains(&name.as_str()) {
+                    spec.2 += 1;
+                } else {
+                    spec.1 += 1;
+                }
+            }
+            '*' => i += 1,
+            // Namespace separator: `*|rect`, `|rect`.
+            '|' => i += 1,
+            c if c.is_whitespace() || c == '>' || c == '+' || c == '~' => i += 1,
+            c if c == '\\' || is_css_ident_char(c) => {
+                read_ident(&chars, &mut i)?;
+                if chars.get(i) == Some(&'|') {
+                    // `svg|rect`: a namespace prefix, not a type.
+                    i += 1;
+                } else {
+                    spec.2 += 1;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(spec)
 }
 
 /// Serialize the surviving rules and @-rule blocks in source order.
@@ -1808,15 +1956,140 @@ mod tests {
     // --- helpers ---
 
     #[test]
-    fn specificity_estimate_is_an_upper_bound() {
-        assert_eq!(estimate_specificity("svg path"), (0, 0, 2));
-        assert_eq!(estimate_specificity(".a:hover"), (0, 2, 0));
-        assert_eq!(estimate_specificity("#x > .a::before"), (1, 1, 1));
-        assert_eq!(estimate_specificity("rect[class~=a]"), (0, 1, 1));
-        assert_eq!(estimate_specificity("li:nth-child(2n+1)"), (0, 1, 1));
-        assert_eq!(estimate_specificity("path:not([fill=blue])"), (0, 1, 1));
-        assert_eq!(estimate_specificity(".a, #b"), (1, 0, 0));
-        assert!(estimate_specificity(":is(.a, #b)") >= (1, 0, 0));
+    fn selector_specificity_is_exact() {
+        let spec = selector_specificity;
+        assert_eq!(spec("svg path"), Some((0, 0, 2)));
+        assert_eq!(spec(".a:hover"), Some((0, 2, 0)));
+        assert_eq!(spec("#x > .a::before"), Some((1, 1, 1)));
+        assert_eq!(spec("#x > .a:before"), Some((1, 1, 1)));
+        assert_eq!(spec("rect[class~=a]"), Some((0, 1, 1)));
+        assert_eq!(spec("a[title=\"x,y]\"]"), Some((0, 1, 1)));
+        assert_eq!(spec("li:nth-child(2n+1)"), Some((0, 1, 1)));
+        assert_eq!(spec("li:nth-child(2n+1 of .b, #c)"), Some((1, 1, 1)));
+        assert_eq!(spec("path:not([fill=blue])"), Some((0, 1, 1)));
+        assert_eq!(spec(":not(.a, #b)"), Some((1, 0, 0)));
+        assert_eq!(spec(":where(.x) rect"), Some((0, 0, 1)));
+        assert_eq!(spec(":is(#a,.b) rect"), Some((1, 0, 1)));
+        assert_eq!(spec(":is(.a, :not(#b .c))"), Some((1, 1, 0)));
+        assert_eq!(spec("g :has(> rect.x)"), Some((0, 1, 2)));
+        assert_eq!(spec("*"), Some((0, 0, 0)));
+        assert_eq!(spec("* > rect"), Some((0, 0, 1)));
+        assert_eq!(spec("svg|rect"), Some((0, 0, 1)));
+        assert_eq!(spec("*|rect"), Some((0, 0, 1)));
+        assert_eq!(spec(":lang(en)"), Some((0, 1, 0)));
+        assert_eq!(spec(".a ~ .b + .c"), Some((0, 3, 0)));
+        // Not understood: unknown functional pseudo-classes, nesting,
+        // pseudo-elements with arguments, dangling escapes.
+        assert_eq!(spec("path:foo(bar)"), None);
+        assert_eq!(spec(":host(.x)"), None);
+        assert_eq!(spec("::slotted(rect)"), None);
+        assert_eq!(spec("& .a"), None);
+        assert_eq!(spec(":not("), None);
+        assert_eq!(spec("rect["), None);
+    }
+
+    #[test]
+    fn split_selector_list_ignores_nested_commas() {
+        assert_eq!(
+            split_selector_list(":is(#a,.b) rect, .c, [t=\"x,y\"]"),
+            vec![":is(#a,.b) rect", " .c", " [t=\"x,y\"]"]
+        );
+        assert_eq!(split_selector_list("rect"), vec!["rect"]);
+    }
+
+    // --- exact specificity in the cascade decision ---
+
+    #[test]
+    fn where_rule_ranks_below_later_type_rule() {
+        // `:where(.x) rect` is (0,0,1), same as `rect`, and earlier: the
+        // later rule wins (red). A presentation attribute would lose to the
+        // kept rule, so the declaration goes to the style attribute.
+        let (_, output) = run_pass(&svg(
+            "<style>:where(.x) rect{fill:blue}rect{fill:red}</style><rect class=\"x\"/>",
+        ));
+        assert!(output.contains("style=\"fill:red\""), "{output}");
+        assert!(!output.contains("fill=\"red\""), "{output}");
+        assert!(
+            output.contains("<style>:where(.x) rect{fill:blue}</style>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn is_rule_ranks_as_its_most_specific_argument() {
+        // `:is(#a,.b) rect` is (1,0,1) and outranks `#y` (1,0,0): the kept
+        // rule must keep winning, so `#y` becomes a presentation attribute.
+        let (_, output) = run_pass(&svg(
+            "<style>:is(#a,.b) rect{fill:blue}#y{fill:red}</style><g id=\"a\"><rect id=\"y\"/></g>",
+        ));
+        assert!(output.contains("<rect id=\"y\" fill=\"red\"/>"), "{output}");
+        assert!(!output.contains("style="), "{output}");
+        assert!(
+            output.contains("<style>:is(#a,.b) rect{fill:blue}</style>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn script_kept_unmatched_rule_ranks_in_cascade() {
+        // `.hl` matches nothing yet but a script may add the class; `#x`
+        // outranks it, so after the click the element must stay blue: the
+        // style attribute beats the kept `.hl` rule as `#x` did.
+        let (_, output) = run_pass(&svg(
+            "<style>#x{stroke:blue}.hl{stroke:red}</style><rect id=\"x\" onclick=\"this.classList.add('hl')\"/>",
+        ));
+        assert!(output.contains("style=\"stroke:blue\""), "{output}");
+        assert!(!output.contains("stroke=\"blue\""), "{output}");
+        assert!(
+            output.contains("<style>.hl{stroke:red}</style>"),
+            "{output}"
+        );
+
+        // Reversed ranking: `.hl` (0,1,0) beats `rect` (0,0,1) once added,
+        // so the presentation attribute is the right target.
+        let (_, output) = run_pass(&svg(
+            "<style>rect{stroke:blue}.hl{stroke:red}</style><rect onclick=\"this.classList.add('hl')\"/>",
+        ));
+        assert!(output.contains("stroke=\"blue\""), "{output}");
+        assert!(!output.contains("style="), "{output}");
+    }
+
+    #[test]
+    fn selector_list_with_mixed_specificity_blocks() {
+        // Which alternative matches the path is unknown: `svg path` ranks
+        // below `.a`, `g :hover` above it. Neither target is safe.
+        let input = svg(
+            "<style>.a{fill:red}svg path, g :hover{fill:blue}</style><g><path class=\"a\"/></g>",
+        );
+        let (result, output) = run_pass(&input);
+        assert_eq!(result, PassResult::Unchanged, "{output}");
+    }
+
+    #[test]
+    fn unknown_functional_pseudo_blocks_competing_declarations() {
+        let input = svg("<style>.a{fill:red}path:foo(bar){fill:blue}</style><path class=\"a\"/>");
+        let (result, output) = run_pass(&input);
+        assert_eq!(result, PassResult::Unchanged, "{output}");
+
+        // Other properties are unaffected.
+        let (_, output) = run_pass(&svg(
+            "<style>.a{fill:red;stroke:green}path:foo(bar){fill:blue}</style><path class=\"a\"/>",
+        ));
+        assert!(output.contains("stroke=\"green\""), "{output}");
+        assert!(!output.contains("fill=\"red\""), "{output}");
+        assert!(output.contains(".a{fill:red}"), "{output}");
+    }
+
+    #[test]
+    fn comma_inside_pseudo_argument_is_one_selector_part() {
+        let (_, output) = run_pass(&svg(
+            "<style>:is(#a,.b) rect, .c{fill:blue}</style><g id=\"a\"><rect/></g><rect class=\"c\"/>",
+        ));
+        assert!(output.contains("<rect fill=\"blue\"/>"), "{output}");
+        assert!(
+            output.contains("<style>:is(#a,.b) rect{fill:blue}</style>"),
+            "{output}"
+        );
     }
 
     #[test]
