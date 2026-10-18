@@ -337,3 +337,237 @@ fn non_finite_numbers_never_reach_the_output() {
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 }
+
+#[test]
+fn illustrator_entities() {
+    // DOCTYPE internal-subset entities (`xmlns="&ns_svg;"`, classic Adobe
+    // Illustrator exports) must be expanded, or the root ends up outside the
+    // SVG namespace and browsers render nothing.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/illustrator_entities.svg",
+    ));
+    assert_valid_svg(&output, "illustrator_entities");
+    assert!(
+        output.contains("xmlns=\"http://www.w3.org/2000/svg\""),
+        "{output}"
+    );
+    assert!(!output.contains("&amp;ns_"), "{output}");
+    assert!(!output.contains("&amp;brand"), "{output}");
+    assert!(
+        output.contains("fill=\"red\"") || output.contains("fill=\"#f00\""),
+        "{output}"
+    );
+    assert!(output.contains("#ff0000 text"), "{output}");
+    // Editor namespaces bound through entities are recognised by URI.
+    assert!(!output.contains("i:pgf"), "{output}");
+    assert!(!output.contains("xmlns:i="), "{output}");
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
+
+/// Every prefix used by an element or attribute in `output` must be declared
+/// on that element or one of its ancestors (otherwise the XML is ill-formed).
+fn assert_prefixes_declared(output: &str) {
+    use svgm_core::ast::{Document, NodeId, NodeKind};
+    fn walk(doc: &Document, id: NodeId, in_scope: &[String]) {
+        let mut scope = in_scope.to_vec();
+        if let NodeKind::Element(ref elem) = doc.node(id).kind {
+            scope.extend(elem.namespaces.iter().map(|ns| ns.prefix.clone()));
+            let used = elem
+                .prefix
+                .iter()
+                .chain(elem.attributes.iter().filter_map(|a| a.prefix.as_ref()));
+            for prefix in used {
+                assert!(
+                    prefix == "xml" || scope.contains(prefix),
+                    "prefix {prefix}: used on <{}> but not declared",
+                    elem.qualified_name()
+                );
+            }
+        }
+        for child in doc.children(id) {
+            walk(doc, child, &scope);
+        }
+    }
+    let doc = svgm_core::parser::parse(output).unwrap();
+    walk(&doc, doc.root, &[]);
+}
+
+#[test]
+fn editor_namespaces_by_uri() {
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/editor_namespaces_by_uri.svg",
+    ));
+    assert_valid_svg(&output, "editor_namespaces_by_uri");
+    assert_prefixes_declared(&output);
+    // Editor data under non-canonical prefixes is gone, declarations too.
+    for gone in [
+        "ink:",
+        "sp:",
+        "serif:",
+        "bx:",
+        "v:",
+        "xmlns:ink",
+        "xmlns:sp",
+        "xmlns:serif",
+        "xmlns:bx",
+        "xmlns:v",
+        "namedview",
+        "documentProperties",
+        "grid",
+    ] {
+        assert!(!output.contains(gone), "{gone} should be removed: {output}");
+    }
+    // `x` bound to XLink and `a` bound to a custom namespace are not editor
+    // data, whatever Illustrator conventionally binds those prefixes to.
+    assert!(
+        output.contains("xmlns:x=\"http://www.w3.org/1999/xlink\""),
+        "{output}"
+    );
+    assert_eq!(output.matches("x:href=\"#").count(), 2, "{output}");
+    assert!(output.contains("a:role=\"keep\""), "{output}");
+    assert!(
+        output.contains("xmlns:a=\"http://example.com/custom\""),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
+
+fn optimize_both_presets(input: &str) -> Vec<(svgm_core::Preset, String)> {
+    [svgm_core::Preset::Safe, svgm_core::Preset::Default]
+        .into_iter()
+        .map(|preset| {
+            let config = svgm_core::Config {
+                preset,
+                ..Default::default()
+            };
+            (
+                preset,
+                svgm_core::optimize_with_config(input, &config)
+                    .unwrap()
+                    .data,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn unsafe_deprecated_attrs_survive_both_presets() {
+    // SVGO only removes these with removeDeprecatedAttrs { removeUnsafe }:
+    // xml:space="preserve" changes text layout and requiredFeatures drives
+    // <switch> selection in user agents that still evaluate it.
+    let input = r#"<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 10 10"><switch><text requiredFeatures="http://www.w3.org/TR/SVG11/feature#Text" x="1" y="5">  a  b  </text><text x="1" y="5">fallback</text></switch></svg>"#;
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(
+            output.contains("xml:space=\"preserve\""),
+            "{preset:?}: {output}"
+        );
+        assert!(
+            output.contains("requiredFeatures=\"http://www.w3.org/TR/SVG11/feature#Text\""),
+            "{preset:?}: {output}"
+        );
+    }
+
+    // enable-background on <svg> is owned by cleanupEnableBackground and
+    // must survive (simplified at most) when a filter uses BackgroundImage.
+    let input = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" enable-background="new 0 0 10 10"><filter id="f"><feBlend in="BackgroundImage" in2="SourceGraphic"/></filter><rect width="10" height="10" fill="red"/><rect width="5" height="5" filter="url(#f)"/></svg>"##;
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(
+            output.contains("enable-background=\"new"),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("BackgroundImage"), "{preset:?}: {output}");
+    }
+}
+
+#[test]
+fn empty_conditional_attrs() {
+    // Empty requiredFeatures/requiredExtensions/systemLanguage evaluate to
+    // false and hide the element; stripping them (SVGO removeEmptyAttrs.02)
+    // would make hidden content visible.
+    let input =
+        fs::read_to_string("tests/fixtures/regression/empty_conditional_attrs.svg").unwrap();
+    for (preset, output) in optimize_both_presets(&input) {
+        assert_valid_svg(&output, "empty_conditional_attrs");
+        assert_eq!(
+            output.matches("requiredFeatures=\"\"").count(),
+            1,
+            "{preset:?}: {output}"
+        );
+        assert_eq!(
+            output.matches("requiredExtensions=\"\"").count(),
+            1,
+            "{preset:?}: {output}"
+        );
+        assert_eq!(
+            output.matches("systemLanguage=\"\"").count(),
+            2,
+            "{preset:?}: {output}"
+        );
+        // Every shape stays hidden: it, or an ancestor, carries one of the
+        // conditional attributes (collapseGroups may push it onto the shape).
+        use svgm_core::ast::{Document, NodeId, NodeKind};
+        fn walk(doc: &Document, id: NodeId, hidden: bool, preset: &str, output: &str) {
+            let mut hidden = hidden;
+            if let NodeKind::Element(ref elem) = doc.node(id).kind {
+                hidden |= elem.attributes.iter().any(|a| {
+                    matches!(
+                        a.name.as_str(),
+                        "requiredFeatures" | "requiredExtensions" | "systemLanguage"
+                    ) && a.value.is_empty()
+                });
+                if matches!(elem.name.as_str(), "rect" | "path") {
+                    assert!(hidden, "{preset}: <{}> became visible: {output}", elem.name);
+                }
+            }
+            for child in doc.children(id) {
+                walk(doc, child, hidden, preset, output);
+            }
+        }
+        let doc = svgm_core::parser::parse(&output).unwrap();
+        walk(&doc, doc.root, false, &format!("{preset:?}"), &output);
+        assert_eq!(
+            output.matches("<rect").count() + output.matches("<path").count(),
+            4,
+            "{preset:?}: {output}"
+        );
+    }
+}
+
+#[test]
+fn processing_instructions_and_license_comments_survive_both_presets() {
+    // SVGO removeXMLProcInst only drops the XML declaration; removeComments
+    // keeps `<!--! ... -->` (its default preservePatterns).
+    let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n<!--!Icon Font v1 by @iconfont - Copyright 2023 Icon Font CIC.-->\n<!-- Generator: Adobe Illustrator -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><?foo bar?><!-- plain --><rect width=\"1\" height=\"1\"/></svg>";
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(!output.contains("<?xml "), "{preset:?}: {output}");
+        assert!(!output.contains("Generator"), "{preset:?}: {output}");
+        assert!(!output.contains("plain"), "{preset:?}: {output}");
+        assert!(
+            output.starts_with("<?xml-stylesheet href=\"style.css\" type=\"text/css\"?><!--!Icon Font v1 by @iconfont - Copyright 2023 Icon Font CIC.--><svg"),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("<?foo bar?>"), "{preset:?}: {output}");
+        let config = svgm_core::Config {
+            preset,
+            ..Default::default()
+        };
+        let again = svgm_core::optimize_with_config(&output, &config).unwrap();
+        assert_eq!(again.data, output, "{preset:?}: not idempotent");
+    }
+    // Disabling removeProcInst round-trips the declaration.
+    let config = svgm_core::Config {
+        pass_overrides: [("removeProcInst".to_string(), false)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let output = svgm_core::optimize_with_config(input, &config)
+        .unwrap()
+        .data;
+    assert!(
+        output.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><?xml-stylesheet"),
+        "{output}"
+    );
+}

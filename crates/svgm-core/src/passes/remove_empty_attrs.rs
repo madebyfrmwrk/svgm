@@ -1,6 +1,12 @@
 use super::{Pass, PassResult};
 use crate::ast::{Document, NodeKind};
 
+/// Conditional processing attributes (SVGO `attrsGroups.conditionalProcessing`).
+/// An empty value evaluates to false and keeps the element from rendering,
+/// so removing it would make hidden content visible.
+const CONDITIONAL_PROCESSING_ATTRS: &[&str] =
+    &["requiredExtensions", "requiredFeatures", "systemLanguage"];
+
 pub struct RemoveEmptyAttrs;
 
 impl Pass for RemoveEmptyAttrs {
@@ -17,9 +23,11 @@ impl Pass for RemoveEmptyAttrs {
             if let NodeKind::Element(ref mut elem) = node.kind {
                 let before = elem.attributes.len();
                 elem.attributes.retain(|attr| {
-                    // Keep attributes that are meaningful when empty (e.g., alt, title)
-                    // For SVG, empty string attributes are generally useless
+                    // Empty attributes are useless, except the conditional
+                    // processing ones, which hide the element when empty.
                     !attr.value.is_empty()
+                        || (attr.prefix.is_none()
+                            && CONDITIONAL_PROCESSING_ATTRS.contains(&attr.name.as_str()))
                 });
                 if elem.attributes.len() != before {
                     changed = true;
@@ -49,5 +57,24 @@ mod tests {
         let output = serialize(&doc);
         assert!(!output.contains("class"));
         assert!(output.contains("fill"));
+    }
+
+    #[test]
+    fn svgo_fixture_02_keeps_empty_conditional_processing_attrs() {
+        // SVGO removeEmptyAttrs.02: empty conditional processing attributes
+        // prevent elements from rendering and must be preserved.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g requiredFeatures=""></g><g requiredExtensions=""></g><g systemLanguage=""></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveEmptyAttrs.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
+
+        // Other empty attributes on the same element still go.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect systemLanguage="" class="" width="1"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveEmptyAttrs.run(&mut doc), PassResult::Changed);
+        assert_eq!(
+            serialize(&doc),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect systemLanguage="" width="1"/></svg>"#
+        );
     }
 }
