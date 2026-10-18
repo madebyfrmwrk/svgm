@@ -1,6 +1,7 @@
 use super::{
     MOVEABLE_ELEMENTS, Pass, PassResult, has_animated_attr_deep, has_animation_child,
     has_group_only_prop, has_structural_css, has_url_reference, style_declaration,
+    stylesheet_declarations, stylesheet_declares,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -15,9 +16,15 @@ impl Pass for MoveGroupAttrsToElems {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
-        // A surviving stylesheet may set `transform` on the group or its
-        // children by selector; moving the attribute would change the cascade.
-        if has_structural_css(doc) {
+        // A surviving stylesheet may select by structure, or set `transform`
+        // (or how it is applied, or a `url()` paint/clip) on a child by
+        // class; a CSS `transform` would then override the moved attribute.
+        if has_structural_css(doc)
+            || stylesheet_declares(doc, &["transform", "transform-origin", "transform-box"])
+            || stylesheet_declarations(doc)
+                .iter()
+                .any(|(_, value)| value.contains("url("))
+        {
             return PassResult::Unchanged;
         }
 
@@ -160,6 +167,35 @@ mod tests {
         let mut doc = parse(input).unwrap();
         assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
         assert_eq!(serialize(&doc), input);
+    }
+
+    #[test]
+    fn class_only_css_allows_moving() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a:hover{fill:red}</style><g transform=\"translate(1 2)\"><path class=\"a\" d=\"M0 0h1\"/><path d=\"M1 1h1\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Changed);
+        assert!(!serialize(&doc).contains("g transform="));
+    }
+
+    #[test]
+    fn css_transform_or_url_blocks_moving() {
+        for css in [
+            ".a{transform:rotate(1deg)}",
+            ".a{transform-origin:center}",
+            ".a{transform-box:fill-box}",
+            ".a{fill:url(#g)}",
+        ] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><g transform=\"translate(1 2)\"><path class=\"a\" d=\"M0 0h1\"/><path d=\"M1 1h1\"/></g></svg>"
+            );
+            let mut doc = parse(&input).unwrap();
+            assert_eq!(
+                MoveGroupAttrsToElems.run(&mut doc),
+                PassResult::Unchanged,
+                "{css}"
+            );
+            assert_eq!(serialize(&doc), input);
+        }
     }
 
     #[test]

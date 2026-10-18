@@ -11,7 +11,7 @@
 
 use super::{
     Pass, PassResult, attributes_in_stylesheets, has_scripts, inside_foreign_object,
-    is_css_ident_char, split_declarations, split_property, strip_css_comments,
+    is_css_ident_char, split_declarations, split_property, split_selector_list, strip_css_comments,
 };
 use crate::ast::{Attribute, Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
@@ -914,45 +914,6 @@ fn extract_class_names(selector: &str) -> Vec<String> {
             i += 1;
         }
     }
-    out
-}
-
-/// Split a selector list at the commas between its complex selectors,
-/// leaving commas inside `:is(a, b)`, `[attr="x,y"]` and strings alone.
-fn split_selector_list(selector: &str) -> Vec<&str> {
-    let bytes = selector.as_bytes();
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut parens = 0u32;
-    let mut brackets = 0u32;
-    let mut quote: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == b'\\' {
-                i += 1;
-            } else if b == q {
-                quote = None;
-            }
-        } else {
-            match b {
-                b'\\' => i += 1,
-                b'"' | b'\'' => quote = Some(b),
-                b'(' => parens += 1,
-                b')' => parens = parens.saturating_sub(1),
-                b'[' => brackets += 1,
-                b']' => brackets = brackets.saturating_sub(1),
-                b',' if parens == 0 && brackets == 0 => {
-                    out.push(&selector[start..i]);
-                    start = i + 1;
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    out.push(&selector[start..]);
     out
 }
 

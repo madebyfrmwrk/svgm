@@ -1,7 +1,7 @@
 use super::{
     MOVEABLE_ELEMENTS, Pass, PassResult, has_animated_attr_deep, has_animation_child,
-    has_group_only_prop, has_structural_css, parent_is, split_declarations, split_property,
-    strip_important, style_declaration,
+    has_group_only_prop, has_structural_css, has_stylesheet, parent_is, split_declarations,
+    split_property, strip_important, style_declaration,
 };
 use crate::ast::{Document, Element, Namespace, NodeId, NodeKind};
 
@@ -19,6 +19,10 @@ impl Pass for CollapseGroups {
         if has_structural_css(doc) {
             return PassResult::Unchanged;
         }
+        // Class/id rules remain: an attribute-less group matches none of
+        // them, but moving a group's attributes onto its child (case 3) is
+        // only safe when neither carries a class or id (see below).
+        let stylesheet = has_stylesheet(doc);
 
         let mut changed = false;
 
@@ -78,6 +82,7 @@ impl Pass for CollapseGroups {
                 let child_id = children[0];
                 if let NodeKind::Element(ref child_elem) = doc.node(child_id).kind
                     && can_merge_into_child(doc, elem, child_id, child_elem)
+                    && !(stylesheet && (selectable(elem) || selectable(child_elem)))
                 {
                     merge_group_into_child(doc, id, child_id);
                     changed = true;
@@ -136,6 +141,15 @@ fn hoist_children(doc: &mut Document, group_id: NodeId, parent_id: NodeId) {
             doc.node_mut(child).parent = Some(parent_id);
         }
     }
+}
+
+/// True when a class or id selector could match the element. Under a
+/// stylesheet, moving the group's class onto the child would retarget the
+/// group's rules (non-inheritable `opacity`/`transform`/`filter` stop
+/// applying to the group as a whole), and a child's class rules would
+/// override merged non-inheritable attributes that used to compose.
+fn selectable(elem: &Element) -> bool {
+    has_attr(elem, "class") || has_attr(elem, "id")
 }
 
 fn has_attr(elem: &Element, name: &str) -> bool {
@@ -290,6 +304,46 @@ mod tests {
             assert_eq!(CollapseGroups.run(&mut doc), PassResult::Unchanged, "{css}");
             assert_eq!(serialize(&doc), input, "{css}");
         }
+    }
+
+    #[test]
+    fn class_only_css_allows_collapsing() {
+        // Issue #47: `.a` matches the rect whatever its ancestors are.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{.a{fill:red}}</style><g><rect class=\"a\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
+        assert_eq!(
+            serialize(&doc),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{.a{fill:red}}</style><rect class=\"a\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn class_only_css_blocks_merging_selectable_elements() {
+        for input in [
+            // The group's class would retarget `.b{opacity}` to the child.
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.b{opacity:.5}</style><g class=\"b\" opacity=\".5\"><rect/></g></svg>",
+            // `.a{opacity:1}` would override the merged opacity attribute
+            // instead of composing with the group's.
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{opacity:1}</style><g opacity=\".5\"><rect class=\"a\"/></g></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#x:target{opacity:1}</style><g id=\"x\" opacity=\".5\"><rect/></g></svg>",
+        ] {
+            let mut doc = parse(input).unwrap();
+            assert_eq!(
+                CollapseGroups.run(&mut doc),
+                PassResult::Unchanged,
+                "{input}"
+            );
+            assert_eq!(serialize(&doc), input);
+        }
+    }
+
+    #[test]
+    fn class_only_css_still_merges_plain_elements() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{fill:red}</style><g fill=\"red\"><rect/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
+        assert!(serialize(&doc).contains("<rect fill=\"red\"/>"));
     }
 
     #[test]

@@ -988,3 +988,27 @@ fn css_keyframes_only() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+#[test]
+fn css_class_only_at_rule() {
+    // Issue #47: a stylesheet that selects only by class/id (here under
+    // @media and :hover) no longer blocks group collapsing or shape
+    // conversion; the classes keep matching after the rename.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/css_class_only_at_rule.svg",
+    ));
+    assert_valid_svg(&output, "css_class_only_at_rule");
+    assert!(output.contains("@media print{.st0{fill:#000}}"), "{output}");
+    assert!(output.contains(".st0:hover{fill:red}"), "{output}");
+    assert!(!output.contains("<g"), "{output}");
+    assert!(
+        output.contains("<path class=\"st0\" d=\"M0 0h10v10H0z\"/>"),
+        "{output}"
+    );
+    assert!(
+        output.contains("<circle class=\"st1\" cx=\"50\" cy=\"50\" r=\"5\"/>"),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}

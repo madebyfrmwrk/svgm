@@ -1,4 +1,7 @@
-use super::{Pass, PassResult, has_structural_css, parse_svg_number};
+use super::{
+    Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css, parse_svg_number,
+    stylesheet_declares,
+};
 use crate::ast::{Attribute, Document, NodeKind};
 
 pub struct ConvertShapeToPath {
@@ -18,8 +21,10 @@ impl Pass for ConvertShapeToPath {
 
     fn run(&self, doc: &mut Document) -> PassResult {
         // Renaming `<rect>` to `<path>` would stop type selectors
-        // (`rect{...}`, `rect[class~=a]`) in a surviving stylesheet matching.
-        if has_structural_css(doc) {
+        // (`rect{...}`, `rect[class~=a]`) in a surviving stylesheet matching,
+        // and class/id rules may set geometry or markers that only apply to
+        // one of the two element types.
+        if has_structural_css(doc) || stylesheet_declares(doc, SHAPE_SENSITIVE_PROPS) {
             return PassResult::Unchanged;
         }
 
@@ -441,6 +446,42 @@ mod tests {
         ] {
             let input = format!(
                 "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><g><rect class=\"a\" width=\"10\" height=\"10\"/></g></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{css}: {output}");
+            assert!(output.contains("<rect"), "{css}: {output}");
+        }
+    }
+
+    #[test]
+    fn class_only_css_allows_conversion() {
+        // Issue #47 / SVGO inlineStyles.12: class selectors keep matching.
+        for css in ["@media print{.a{fill:red}}", ".a:hover{fill:red}"] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><g><rect class=\"a\" width=\"10\" height=\"10\"/></g></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Changed, "{css}: {output}");
+            assert!(
+                output.contains("<path class=\"a\" d=\"M0 0h10v10H0z\"/>"),
+                "{css}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn css_geometry_or_markers_block_conversion() {
+        // `.a{width:20px}` resizes a rect but not a path (SVGO converts and
+        // renders differently); markers draw on paths only.
+        for css in [
+            ".a{width:20px}",
+            ".a{RX:2px}",
+            ".a{marker-end:url(#m)}",
+            "@keyframes k{to{height:5px}}",
+            ".b{d:path(\"M0 0\")}",
+        ] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><rect class=\"a\" width=\"10\" height=\"10\"/></svg>"
             );
             let (result, output) = run_pass(&input);
             assert_eq!(result, PassResult::Unchanged, "{css}: {output}");

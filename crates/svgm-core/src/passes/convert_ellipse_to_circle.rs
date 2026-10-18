@@ -1,4 +1,4 @@
-use super::{Pass, PassResult, has_structural_css};
+use super::{Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css, stylesheet_declares};
 use crate::ast::{Attribute, Document, NodeKind};
 
 /// Converts `<ellipse>` to `<circle>` when `rx` equals `ry`, or when one
@@ -14,8 +14,9 @@ impl Pass for ConvertEllipseToCircle {
     fn run(&self, doc: &mut Document) -> PassResult {
         // A stylesheet may select on the element name (`g ellipse`,
         // `ellipse:first-child`): renaming the element would change which
-        // rules apply. Same guard as convertShapeToPath.
-        if has_structural_css(doc) {
+        // rules apply, and `.a{rx:5px}` sizes an ellipse but not a circle.
+        // Same guard as convertShapeToPath.
+        if has_structural_css(doc) || stylesheet_declares(doc, SHAPE_SENSITIVE_PROPS) {
             return PassResult::Unchanged;
         }
 
@@ -136,6 +137,23 @@ mod tests {
         let output = serialize(&doc);
         assert!(output.contains("<ellipse rx=\"5\" ry=\"5\"/>"), "{output}");
         assert!(!output.contains("<circle"), "{output}");
+    }
+
+    #[test]
+    fn class_only_css_allows_conversion() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.a:hover{fill:red}</style><ellipse class="a" rx="5" ry="5"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Changed);
+        assert!(serialize(&doc).contains("<circle class=\"a\" r=\"5\"/>"));
+    }
+
+    #[test]
+    fn css_radius_blocks_conversion() {
+        // `rx` applies to <ellipse> but not to <circle>.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.a{rx:9px}</style><ellipse class="a" rx="5" ry="5"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
     }
 
     #[test]

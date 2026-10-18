@@ -325,11 +325,291 @@ pub(crate) fn has_stylesheet(doc: &Document) -> bool {
     false
 }
 
-/// True when a stylesheet may affect structure-sensitive optimizations.
-/// Currently an alias of [`has_stylesheet`]; a later work package (WP6) may
-/// refine it to ignore stylesheets whose rules are all inlined/safe.
+/// True when a stylesheet has a selector that depends on element names or
+/// tree structure ([`StructuralCss::Structural`]): renaming an element
+/// (`rect` -> `path`) or removing/merging a `<g>` could change what it
+/// matches. Class/id-only sheets do not count; passes that run under them
+/// still have to check what such rules *declare* (see
+/// [`stylesheet_declares`]).
 pub(crate) fn has_structural_css(doc: &Document) -> bool {
-    has_stylesheet(doc)
+    classify_stylesheets(doc) == StructuralCss::Structural
+}
+
+/// How the selectors of all `<style>` elements relate to document structure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuralCss {
+    /// No stylesheet with content.
+    None,
+    /// Every selector is a single compound of classes, ids, `*` and
+    /// state pseudo-classes (`.a`, `#x:target`, `.st0:hover`), at any
+    /// conditional at-rule depth. A sheet without selectors (only
+    /// `@keyframes` / `@font-face`) is also `ClassIdOnly`.
+    ClassIdOnly,
+    /// Some selector uses a type selector, a bare `*`, a combinator, an
+    /// attribute selector, a tree or functional pseudo-class, a
+    /// pseudo-element or CSS nesting, or the sheet `@import`s another one.
+    Structural,
+}
+
+/// Pseudo-classes that depend on element state, not on its name or position
+/// in the tree.
+const STATE_PSEUDO_CLASSES: &[&str] = &[
+    "hover",
+    "focus",
+    "focus-visible",
+    "active",
+    "target",
+    "visited",
+    "link",
+    "any-link",
+    "checked",
+    "disabled",
+    "enabled",
+];
+
+/// Statement at-rules (`@x ...;`) that cannot bring in selectors.
+const HARMLESS_STATEMENT_AT_RULES: &[&str] = &["charset", "namespace", "layer"];
+
+/// At-rule name of a prelude starting with `@`, lowercased, with a vendor
+/// prefix removed (`@-webkit-keyframes` -> `keyframes`).
+fn at_rule_name(prelude: &str) -> Option<String> {
+    let rest = prelude.trim_start().strip_prefix('@')?;
+    let name: String = rest
+        .chars()
+        .take_while(|&ch| is_css_ident_char(ch))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let bare = name.trim_start_matches('-');
+    let bare = bare
+        .split_once('-')
+        .filter(|(vendor, _)| matches!(*vendor, "webkit" | "moz" | "ms" | "o"))
+        .map_or(bare, |(_, rest)| rest);
+    Some(bare.to_string())
+}
+
+/// Classify every selector of every `<style>` element (including ones
+/// inside `<foreignObject>`: an HTML `<style>` there applies to the whole
+/// document).
+pub(crate) fn classify_stylesheets(doc: &Document) -> StructuralCss {
+    if !has_stylesheet(doc) {
+        return StructuralCss::None;
+    }
+    #[derive(Clone, Copy, PartialEq)]
+    enum Block {
+        /// Body holds rules: top level, `@media`, `@supports`, unknown.
+        Rules,
+        /// Body of a style rule: declarations.
+        StyleDecls,
+        /// Body of `@keyframes`, `@font-face` ...: never selectors.
+        AtDecls,
+    }
+    let css = strip_css_comments(&stylesheet_text(doc));
+    let chars: Vec<char> = css.chars().collect();
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut prelude_start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        let context = blocks.last().copied().unwrap_or(Block::Rules);
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '\\' => {
+                // An escaped character never opens/closes a block.
+                i += 2;
+                continue;
+            }
+            '{' => {
+                let prelude: String = chars[prelude_start..i].iter().collect();
+                let kind = match context {
+                    Block::Rules => match at_rule_name(&prelude) {
+                        Some(name) if DECLARATION_AT_RULES.contains(&name.as_str()) => {
+                            Block::AtDecls
+                        }
+                        Some(_) => Block::Rules,
+                        None => {
+                            if !split_selector_list(&prelude)
+                                .into_iter()
+                                .all(selector_is_class_id_only)
+                            {
+                                return StructuralCss::Structural;
+                            }
+                            Block::StyleDecls
+                        }
+                    },
+                    // CSS nesting (`.a{ & rect{} }`) selects by structure.
+                    Block::StyleDecls => return StructuralCss::Structural,
+                    Block::AtDecls => Block::AtDecls,
+                };
+                blocks.push(kind);
+                prelude_start = i + 1;
+            }
+            '}' => {
+                blocks.pop();
+                prelude_start = i + 1;
+            }
+            ';' => {
+                if context == Block::Rules {
+                    let prelude: String = chars[prelude_start..i].iter().collect();
+                    // `@import` pulls in selectors we cannot see.
+                    if let Some(name) = at_rule_name(&prelude)
+                        && !HARMLESS_STATEMENT_AT_RULES.contains(&name.as_str())
+                    {
+                        return StructuralCss::Structural;
+                    }
+                }
+                prelude_start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    StructuralCss::ClassIdOnly
+}
+
+/// Split a selector list at the commas between its complex selectors,
+/// leaving commas inside `:is(a, b)`, `[attr="x,y"]` and strings alone.
+pub(crate) fn split_selector_list(selector: &str) -> Vec<&str> {
+    let bytes = selector.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut parens = 0u32;
+    let mut brackets = 0u32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 1;
+            } else if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'\\' => i += 1,
+                b'"' | b'\'' => quote = Some(b),
+                b'(' => parens += 1,
+                b')' => parens = parens.saturating_sub(1),
+                b'[' => brackets += 1,
+                b']' => brackets = brackets.saturating_sub(1),
+                b',' if parens == 0 && brackets == 0 => {
+                    out.push(&selector[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    out.push(&selector[start..]);
+    out
+}
+
+/// Skip a CSS identifier (with backslash escapes) starting at `*i`; false
+/// when it is empty.
+fn skip_css_ident(chars: &[char], i: &mut usize) -> bool {
+    let start = *i;
+    while *i < chars.len() {
+        if chars[*i] == '\\' {
+            // Up to six hex digits plus one optional whitespace, or a single
+            // escaped character.
+            *i += 1;
+            let hex_start = *i;
+            while *i < chars.len() && *i - hex_start < 6 && chars[*i].is_ascii_hexdigit() {
+                *i += 1;
+            }
+            if *i == hex_start || (*i < chars.len() && chars[*i].is_whitespace()) {
+                *i += 1;
+            }
+        } else if is_css_ident_char(chars[*i]) {
+            *i += 1;
+        } else {
+            break;
+        }
+    }
+    *i = (*i).min(chars.len());
+    *i > start
+}
+
+/// True when `selector` is a single compound selector made of at least one
+/// `.class` or `#id`, optionally with `*` and [`STATE_PSEUDO_CLASSES`]. Such
+/// a selector matches the same elements whatever their names or ancestors.
+fn selector_is_class_id_only(selector: &str) -> bool {
+    let chars: Vec<char> = selector.trim().chars().collect();
+    let mut i = 0;
+    let mut has_class_or_id = false;
+    while i < chars.len() {
+        match chars[i] {
+            '.' | '#' => {
+                i += 1;
+                if !skip_css_ident(&chars, &mut i) {
+                    return false;
+                }
+                has_class_or_id = true;
+            }
+            '*' => i += 1,
+            ':' => {
+                i += 1;
+                let start = i;
+                if !skip_css_ident(&chars, &mut i) {
+                    // `::before` or a stray colon.
+                    return false;
+                }
+                let name: String = chars[start..i]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if !STATE_PSEUDO_CLASSES.contains(&name.as_str()) {
+                    return false;
+                }
+            }
+            // Type selectors, combinators, `[attr]`, `|`, `&`, `(` ...
+            _ => return false,
+        }
+    }
+    has_class_or_id
+}
+
+/// CSS properties whose effect depends on the element they land on: SVG 2
+/// geometry properties override the attributes a shape conversion reads
+/// (`.a{width:20px}` resizes a `<rect>` but not a `<path>`), `d` starts
+/// applying once an element becomes a `<path>`, and markers draw on paths
+/// but not on `<rect>`/`<circle>`/`<ellipse>`.
+pub(crate) const SHAPE_SENSITIVE_PROPS: &[&str] = &[
+    "x",
+    "y",
+    "width",
+    "height",
+    "rx",
+    "ry",
+    "cx",
+    "cy",
+    "r",
+    "d",
+    "marker",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
+];
+
+/// True when any declaration in any `<style>` (at any depth, including
+/// `@keyframes` bodies) sets one of `props` (ASCII case-insensitive).
+pub(crate) fn stylesheet_declares(doc: &Document, props: &[&str]) -> bool {
+    stylesheet_declarations(doc)
+        .iter()
+        .any(|(name, _)| props.iter().any(|p| name.eq_ignore_ascii_case(p)))
 }
 
 /// Remove `/* ... */` comments from CSS text.
@@ -943,13 +1223,100 @@ mod tests {
             parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:red}</style></svg>"#)
                 .unwrap();
         assert!(has_stylesheet(&css));
-        assert!(has_structural_css(&css));
+        // Class-only selectors do not depend on structure.
+        assert!(!has_structural_css(&css));
 
         let cdata = parse(
             r#"<svg xmlns="http://www.w3.org/2000/svg"><style><![CDATA[.a{fill:red}]]></style></svg>"#,
         )
         .unwrap();
         assert!(has_stylesheet(&cdata));
+    }
+
+    fn classify(css: &str) -> StructuralCss {
+        let doc = parse(&format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><rect/></svg>"
+        ))
+        .unwrap();
+        classify_stylesheets(&doc)
+    }
+
+    #[test]
+    fn classify_stylesheets_class_id_only() {
+        for css in [
+            ".a{fill:red}",
+            "@media print{.a{fill:red}}",
+            "@media (min-width:1px){@supports (display:grid){.a{fill:red}}}",
+            ".st0:hover{fill:red}",
+            "#x:target{fill:red}",
+            ".a.b#c,.d{fill:red}",
+            "*.a{fill:red}",
+            ".\\31 a{fill:red}",
+            ".é{fill:red}",
+            ".a{content:\"{g rect}\"}",
+            "/* g rect{} */.a{fill:red}",
+            "@charset \"utf-8\";.a{fill:red}",
+            // No selectors at all.
+            "@keyframes k{from{opacity:0}to{opacity:1}}",
+            "@-webkit-keyframes k{0%{opacity:0}}",
+            "@font-face{font-family:x;src:url(x.woff)}",
+        ] {
+            assert_eq!(classify(css), StructuralCss::ClassIdOnly, "{css}");
+        }
+    }
+
+    #[test]
+    fn classify_stylesheets_structural() {
+        for css in [
+            "g rect{fill:red}",
+            ".a rect{fill:red}",
+            ".a .b{fill:red}",
+            ".a>.b{fill:red}",
+            ".a+.b{fill:red}",
+            ".a~.b{fill:red}",
+            "rect[class~=a]{fill:red}",
+            "[fill]{fill:red}",
+            ".a[x]{fill:red}",
+            "rect{fill:red}",
+            "rect.a{fill:red}",
+            "svg|rect{fill:red}",
+            "*{opacity:.5}",
+            ".a:first-child{fill:red}",
+            ".a:not(.b){fill:red}",
+            ":is(.a, g rect){fill:red}",
+            ":root{fill:red}",
+            ".a::before{fill:red}",
+            ".a,g{fill:red}",
+            "@media print{g{opacity:1}}",
+            "@import url(x.css);",
+            ".a{fill:red;& rect{fill:blue}}",
+        ] {
+            assert_eq!(classify(css), StructuralCss::Structural, "{css}");
+        }
+    }
+
+    #[test]
+    fn classify_stylesheets_none_and_foreign_object() {
+        let none = parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#).unwrap();
+        assert_eq!(classify_stylesheets(&none), StructuralCss::None);
+        assert_eq!(classify(" \n "), StructuralCss::None);
+        // An HTML <style> inside <foreignObject> applies document-wide.
+        let fo = parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><style>rect{fill:red}</style></foreignObject><rect/></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(classify_stylesheets(&fo), StructuralCss::Structural);
+    }
+
+    #[test]
+    fn stylesheet_declares_sees_nested_blocks() {
+        let doc = parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><style>@media print{.a{WIDTH:2px}}@keyframes k{to{r:5}}</style></svg>"#,
+        )
+        .unwrap();
+        assert!(stylesheet_declares(&doc, &["width"]));
+        assert!(stylesheet_declares(&doc, &["r"]));
+        assert!(!stylesheet_declares(&doc, &["height"]));
     }
 
     #[test]
