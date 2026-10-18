@@ -8,12 +8,41 @@ permissions:
   contents: write
   id-token: write
 
+# A tag that is deleted and re-pushed (or re-pointed) starts a new run; cancel
+# the superseded one instead of racing it for the same npm versions.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    name: Verify tag matches package versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare tag with Cargo.toml and svgm-napi/package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          napi_version="$(node -p "require('./crates/svgm-napi/package.json').version")"
+          echo "tag=$tag cargo=$cargo_version napi=$napi_version"
+          status=0
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::tag v$tag does not match workspace version $cargo_version in Cargo.toml"
+            status=1
+          fi
+          if [ "$tag" != "$napi_version" ]; then
+            echo "::error::tag v$tag does not match version $napi_version in crates/svgm-napi/package.json"
+            status=1
+          fi
+          exit $status
+
   build:
     name: Build (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,7 +57,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -45,23 +74,24 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: Compress-Archive -Path target/${{ matrix.target }}/release/svgm.exe -DestinationPath svgm-${{ matrix.target }}.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: svgm-${{ matrix.target }}
           path: svgm-${{ matrix.target }}.*
 
   wasm:
     name: Publish WASM to npm
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -76,11 +106,20 @@ jobs:
         run: |
           node -e "const p = require('./pkg/package.json'); if (p.name !== 'svgm-wasm') throw new Error('unexpected name: ' + p.name)"
         working-directory: crates/svgm-wasm
-      - run: npm publish --access public --provenance
+      - name: Publish (skipped if this version is already on npm)
         working-directory: crates/svgm-wasm/pkg
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::notice::$name@$version is already published, skipping"
+          else
+            npm publish --access public --provenance
+          fi
 
   napi:
     name: Build NAPI (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -97,14 +136,14 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: napi-${{ matrix.target }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - run: npm install
@@ -114,7 +153,7 @@ jobs:
         run: sudo apt-get install -y musl-tools
       - run: npx napi build --release --platform --target ${{ matrix.target }}
         working-directory: crates/svgm-napi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: napi-${{ matrix.target }}
           path: crates/svgm-napi/*.node
@@ -127,29 +166,37 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: napi-*
           path: crates/svgm-napi
           merge-multiple: true
-      - run: npm publish --access public --provenance
+      - name: Publish (skipped if this version is already on npm)
         working-directory: crates/svgm-napi
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::notice::$name@$version is already published, skipping"
+          else
+            npm publish --access public --provenance
+          fi
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: svgm-*
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: svgm-*

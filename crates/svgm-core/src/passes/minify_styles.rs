@@ -52,8 +52,13 @@ impl Pass for MinifyStyles {
 }
 
 /// Minify CSS text: strip comments, collapse whitespace, shorten colors.
+///
+/// Works on raw bytes. Every decision is made on ASCII bytes and every
+/// byte that is kept is copied verbatim, so multi-byte UTF-8 sequences pass
+/// through untouched (issue #23: casting bytes to `char` re-encoded them as
+/// Latin-1 and doubled the text every iteration).
 fn minify_css(css: &str) -> String {
-    let mut result = String::with_capacity(css.len());
+    let mut result: Vec<u8> = Vec::with_capacity(css.len());
     let bytes = css.as_bytes();
     let mut i = 0;
 
@@ -73,7 +78,7 @@ fn minify_css(css: &str) -> String {
         // Collapse whitespace
         if ch.is_ascii_whitespace() {
             // Look at what's around the whitespace
-            let before = result.as_bytes().last().copied();
+            let before = result.last().copied();
             // Skip all consecutive whitespace
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
@@ -88,7 +93,7 @@ fn minify_css(css: &str) -> String {
             // Remove space around structural chars: { } : ; ,
             let structural = |b: Option<u8>| matches!(b, Some(b'{' | b'}' | b':' | b';' | b','));
             if !structural(before) && !structural(after) {
-                result.push(' ');
+                result.push(b' ');
             }
             continue;
         }
@@ -105,9 +110,13 @@ fn minify_css(css: &str) -> String {
             }
         }
 
-        result.push(ch as char);
+        result.push(ch);
         i += 1;
     }
+
+    // Only ASCII bytes were dropped or inserted, so the result is valid UTF-8
+    // whenever the input was. Fall back to the input if that ever fails.
+    let result = String::from_utf8(result).unwrap_or_else(|_| css.to_string());
 
     // Shorten colors in property values
     let shortened = shorten_colors_in_css(&result);
@@ -127,7 +136,8 @@ fn shorten_colors_in_css(css: &str) -> String {
             result.push(':');
             i += 1;
 
-            // Find the end of the value (';' or '}')
+            // Find the end of the value (';' or '}'). Both delimiters are
+            // ASCII, so `val_start..val_end` always sits on char boundaries.
             let val_start = i;
             let mut val_end = i;
             while val_end < bytes.len() && bytes[val_end] != b';' && bytes[val_end] != b'}' {
@@ -142,8 +152,13 @@ fn shorten_colors_in_css(css: &str) -> String {
             }
             i = val_end;
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            // Copy everything up to the next ':' verbatim (char-boundary safe;
+            // pushing `bytes[i] as char` re-encoded non-ASCII, issue #23).
+            let start = i;
+            while i < bytes.len() && bytes[i] != b':' {
+                i += 1;
+            }
+            result.push_str(&css[start..i]);
         }
     }
 
@@ -210,5 +225,26 @@ mod tests {
         assert_eq!(result, PassResult::Changed);
         // #ff0000 should be shortened to red or #f00
         assert!(output.contains("red") || output.contains("#f00"));
+    }
+
+    #[test]
+    fn issue_23_non_ascii_preserved_and_stable() {
+        // Bytes used to be re-encoded as Latin-1 chars, doubling the text (issue #23).
+        let css = ".ǎccent{fill:red}";
+        assert_eq!(minify_css(css), css);
+
+        let css = ".a { font-family: \"Söhne\"; content: \"→\" }";
+        let minified = minify_css(css);
+        assert_eq!(minified, ".a{font-family:\"Söhne\";content:\"→\"}");
+        assert_eq!(minify_css(&minified), minified, "must be idempotent");
+
+        // Non-ASCII inside a would-be color value is left alone, not corrupted.
+        assert_eq!(minify_css(".a{fill:#aǎ}"), ".a{fill:#aǎ}");
+
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.ǎccent{fill:red}</style><rect class=\"ǎccent\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+        assert!(output.contains(".ǎccent{fill:red}"), "{output}");
+        assert!(output.len() <= input.len());
     }
 }

@@ -52,8 +52,8 @@ struct Cli {
     )]
     preset: Option<CliPreset>,
 
-    /// Decimal digits for numeric rounding [default: 3]
-    #[arg(long, value_name = "N")]
+    /// Decimal digits for numeric rounding, 0-20 [default: 3]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(0..=20))]
     precision: Option<u32>,
 
     /// Path to config file (default: auto-discover svgm.config.toml)
@@ -138,6 +138,13 @@ fn build_config(cli: &Cli) -> Config {
 }
 
 fn main() {
+    // Panics inside the optimizer are caught per file (see optimize_guarded)
+    // and reported as ordinary errors; keep the default hook from printing a
+    // second, raw message unless the user asked for a backtrace.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::panic::set_hook(Box::new(|_| {}));
+    }
+
     let cli = Cli::parse();
     let config = build_config(&cli);
 
@@ -397,8 +404,29 @@ fn optimize_file(
 ) -> Result<(usize, String, usize), Box<dyn std::error::Error>> {
     let input = fs::read_to_string(path)?;
     let input_size = input.len();
-    let result = svgm_core::optimize_with_config(&input, config)?;
+    let result = optimize_guarded(&input, config)?;
     Ok((input_size, result.data, result.iterations))
+}
+
+/// Run the optimizer, turning a panic inside svgm-core into an ordinary
+/// per-file error so one bad file cannot abort a whole batch.
+fn optimize_guarded(
+    input: &str,
+    config: &Config,
+) -> Result<svgm_core::OptimizeOutput, Box<dyn std::error::Error>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        svgm_core::optimize_with_config(input, config)
+    })) {
+        Ok(result) => Ok(result?),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown panic".to_string());
+            Err(format!("internal error while optimizing: {msg}").into())
+        }
+    }
 }
 
 fn process_file(
@@ -440,7 +468,15 @@ fn process_file(
     };
 
     let start = Instant::now();
-    let result = svgm_core::optimize_with_config(&input, config)?;
+    let result = match optimize_guarded(&input, config) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(sp) = &spinner {
+                sp.finish_and_clear();
+            }
+            return Err(e);
+        }
+    };
     let elapsed = start.elapsed();
     let output_size = result.data.len();
 

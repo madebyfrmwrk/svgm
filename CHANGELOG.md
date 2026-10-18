@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.9
+
+### Fixed
+
+- **Path data with an unparseable token no longer hangs the optimizer** (#22). `parse_path` looped forever on inputs like `<path d="M0 0 e"/>`, pinning a CPU core and allocating until killed. Parsing now stops at the first token it cannot consume and keeps the valid prefix, matching browser and SVGO error recovery; a path with nothing usable before the bad token is left untouched. The same parser is shared by `convertTransform` and `mergePaths`, so all three are covered.
+- **Non-ASCII text in `<style>` is no longer corrupted and blown up** (#23). `minifyStyles` rebuilt stylesheet text by casting each byte to `char`, which re-encoded every multi-byte UTF-8 character as Latin-1, doubling it on every pass and growing a 100-byte file to 2 MB in a single `optimize()` call. All byte-level rewriters (`minifyStyles`, `convertTransform`'s European-decimal normalizer) now copy non-ASCII bytes verbatim.
+- **Truncated or root-less input is now a parse error instead of empty output** (#24). `optimize("<svg")` returned `Ok("")`, and `<svg>` returned an auto-closed document, so a write-back pipeline could silently replace a file with nothing. The parser now reports `unexpected end of input` for an unfinished start tag, `unclosed tag` for unclosed elements, and `document has no root element` for empty, whitespace-only, declaration-only or comment-only input. Non-`<svg>` roots are still accepted, as in SVGO. A UTF-8 byte-order mark is stripped before parsing.
+- **Non-finite and huge numbers can no longer be written into the output.** `1e999`, `inf`, `nan`, `1e308` and the like (in coordinates, path data, transforms, `viewBox`, `points`) were parsed by Rust's float parser, became `inf`/`NaN` or 300-digit expansions, and re-triggered the #22 hang on the next iteration. Every numeric site now uses the SVG number grammar, rejects non-finite values, and leaves values that cannot be rounded compactly untouched.
+- **`--precision` is now bounded to 0–20.** Values of 309 and above produced `NaN` everywhere and very large values panicked. The CLI rejects out-of-range values; the library, WASM and Node bindings clamp or reject them.
+- **`#800080` was rewritten to `plum`** (`#dda0dd`) instead of `purple` by `convertColors`. Fixed, with a table self-consistency test so a wrong mapping cannot ship again.
+- **Malformed hex colors no longer panic or get rewritten into nonsense.** `#aǎ` aborted the process (a char vector indexed by byte length); `#GGG` became `#gggggg`. Only `#rgb`/`#rrggbb` made of ASCII hex digits are treated as colors.
+- **The fixed-point loop rolls back an iteration that grows the document.** Defence in depth: a misbehaving pass can no longer be amplified ten times over. The CLI also isolates panics per file so one bad input cannot abort a recursive batch, and the Node binding turns panics into JS exceptions.
+- **Consecutive movetos are serialized with their letter.** `convertPathData` emitted `M1 1M50 50` as `M1 1 50 50`, which is a moveto followed by a *lineto* and drew a stray segment (exposed by `mergePaths` on single-moveto paths).
+- **`mergePaths` refuses to merge a path whose `d` could not be parsed in full.** The merged attribute is built from the original strings, so an unparseable tail would otherwise sit mid-path and hide every shape after it.
+- **A bare `&` no longer swallows the rest of a text node or grows a `;`**, and numeric references to characters XML forbids (`&#0;`, `&#1;`) are kept as literal text instead of emitting raw control bytes that svgm itself could not re-parse.
+- **`cleanupNumericValues` never lengthens a value** (`1e14` used to expand to 15 digits) and no longer "repairs" invalid lengths like `5 px`.
+- `inlineStyles` no longer reports a change when it rewrites a presentation attribute to its current value, which made some documents run all 10 iterations.
+- `svgm.config.toml` rejects `precision` above 20 with a clear error instead of silently clamping.
+
+### Changed
+
+- Release workflow: npm publish steps are skipped when the version already exists on the registry, a verify job fails fast when the tag does not match `Cargo.toml` / `svgm-napi/package.json`, superseded runs for a re-pushed tag are cancelled, and the deprecated Node 20 actions were upgraded (`upload-artifact@v7`, `download-artifact@v8`, `checkout@v7`, `setup-node@v7`, `action-gh-release@v3`).
+
 ## 0.3.8
 
 ### Fixed

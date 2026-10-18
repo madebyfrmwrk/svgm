@@ -10,10 +10,16 @@ pub enum ParseError {
     UnexpectedEof,
     #[error("mismatched closing tag: expected </{expected}>, found </{found}>")]
     MismatchedTag { expected: String, found: String },
+    #[error("unclosed tag: <{name}> has no closing tag")]
+    UnclosedTag { name: String },
+    #[error("document has no root element")]
+    NoRootElement,
 }
 
 /// Parse an SVG/XML string into a Document.
 pub fn parse(input: &str) -> Result<Document, ParseError> {
+    // A UTF-8 byte-order mark is not part of the document.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut doc = Document::new();
     let mut stack: Vec<NodeId> = vec![doc.root];
 
@@ -195,6 +201,29 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
         }
     }
 
+    // xmlparser does not report EOF inside an unfinished document, so check
+    // the final state ourselves (issue #24: `<svg` used to become an empty
+    // document and serialize to "").
+    if pending_name.is_some() {
+        // `<svg` / `<rect width="1"` — start tag never finished
+        return Err(ParseError::UnexpectedEof);
+    }
+    if stack.len() > 1 {
+        // `<svg>` / `<svg><g>` — elements never closed
+        let name = match doc.node(*stack.last().unwrap()).kind {
+            NodeKind::Element(ref elem) => elem.qualified_name(),
+            _ => String::new(),
+        };
+        return Err(ParseError::UnclosedTag { name });
+    }
+    let has_root_element = doc
+        .children(doc.root)
+        .any(|id| matches!(doc.node(id).kind, NodeKind::Element(_)));
+    if !has_root_element {
+        // empty / whitespace-only / declaration-only / comment-only input
+        return Err(ParseError::NoRootElement);
+    }
+
     Ok(doc)
 }
 
@@ -207,12 +236,34 @@ fn decode_xml_entities(input: &str) -> Cow<'_, str> {
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '&' {
+            // Scan a bounded reference name; a bare `&` with no terminating
+            // `;` (or with whitespace/markup before it) is literal text and
+            // must not swallow the rest of the string or grow a `;`.
             let mut entity = String::new();
-            for c in chars.by_ref() {
+            let mut terminated = false;
+            while let Some(&c) = chars.peek() {
                 if c == ';' {
+                    chars.next();
+                    terminated = true;
+                    break;
+                }
+                if entity.len() >= 32
+                    || !(c.is_ascii_alphanumeric()
+                        || c == '#'
+                        || c == '_'
+                        || c == '-'
+                        || c == '.'
+                        || c == ':')
+                {
                     break;
                 }
                 entity.push(c);
+                chars.next();
+            }
+            if !terminated {
+                result.push('&');
+                result.push_str(&entity);
+                continue;
             }
             match entity.as_str() {
                 "amp" => result.push('&'),
@@ -228,7 +279,7 @@ fn decode_xml_entities(input: &str) -> Cow<'_, str> {
                     } else {
                         num.parse::<u32>().ok()
                     };
-                    if let Some(c) = code.and_then(char::from_u32) {
+                    if let Some(c) = code.and_then(char::from_u32).filter(|&c| is_xml_char(c)) {
                         result.push(c);
                     } else {
                         // Unrecognized — preserve as-is
@@ -249,6 +300,13 @@ fn decode_xml_entities(input: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(result)
+}
+
+/// XML 1.0 `Char` production: control characters other than tab/LF/CR, the
+/// surrogate range (already excluded by `char`) and U+FFFE/U+FFFF are not
+/// allowed, so a reference to them is kept as literal text.
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')
 }
 
 #[cfg(test)]
@@ -324,5 +382,70 @@ mod tests {
                     .any(|a| a.prefix.as_deref() == Some("xlink") && a.name == "href")
             );
         }
+    }
+
+    #[test]
+    fn issue_24_truncated_and_rootless_inputs_error() {
+        // `<svg` used to parse to an empty document and serialize to "".
+        for input in [
+            "<svg",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"",
+            "<rect width=\"1\"",
+        ] {
+            assert!(
+                matches!(
+                    parse(input),
+                    Err(ParseError::UnexpectedEof) | Err(ParseError::Xml { .. })
+                ),
+                "{input:?}"
+            );
+        }
+        for input in ["<svg>", "<svg><g>", "<svg><rect/>", "<svg><g></g>"] {
+            assert!(
+                matches!(parse(input), Err(ParseError::UnclosedTag { .. })),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "",
+            "   \n",
+            "<?xml version=\"1.0\"?>",
+            "<!-- only a comment -->",
+            "<?xml version=\"1.0\"?>\n<!-- c -->\n",
+        ] {
+            assert!(
+                matches!(
+                    parse(input),
+                    Err(ParseError::NoRootElement) | Err(ParseError::Xml { .. })
+                ),
+                "{input:?}"
+            );
+        }
+        // Non-svg roots are still accepted (SVGO processes any XML).
+        assert!(parse("<html><svg/></html>").is_ok());
+        // A UTF-8 BOM does not break parsing.
+        assert!(parse("\u{feff}<svg xmlns=\"http://www.w3.org/2000/svg\"/>").is_ok());
+    }
+
+    #[test]
+    fn bare_ampersand_and_invalid_references_are_kept_literally() {
+        use crate::serializer::serialize;
+        let doc = parse("<svg xmlns=\"http://www.w3.org/2000/svg\"><text>a & b &lt; c &amp d</text><rect title=\"x & y\"/></svg>").unwrap();
+        let out = serialize(&doc);
+        assert!(out.contains("a &amp; b &lt; c &amp;amp d"), "{out}");
+        assert!(out.contains("title=\"x &amp; y\""), "{out}");
+        assert!(!out.contains("b;"), "a ';' must not be invented: {out}");
+
+        // Control characters are not XML Chars: keep the reference text, and
+        // make sure the output still parses (idempotence).
+        let doc = parse(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>a&#0;b&#1;c&#x9;d&#65;</text></svg>",
+        )
+        .unwrap();
+        let out = serialize(&doc);
+        assert!(out.contains("a&amp;#0;b&amp;#1;c\td"), "{out}");
+        assert!(out.contains("A</text>"), "{out}");
+        assert!(!out.contains('\0'));
+        assert!(parse(&out).is_ok());
     }
 }

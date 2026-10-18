@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, parse_svg_number, representable};
 use crate::ast::{Document, NodeKind};
 
 /// Attributes whose values are numeric and can be cleaned up.
@@ -96,8 +96,8 @@ fn cleanup_numeric(value: &str, precision: u32) -> Option<String> {
         (s, "")
     } else if let Some(s) = trimmed.strip_suffix('%') {
         // Handle percentage values: round and preserve %
-        let num: f64 = s.parse().ok()?;
-        let rounded = round_to(num, precision);
+        let num = parse_svg_number(s)?;
+        let rounded = round_to(num, precision)?;
         let result = format!("{}%", format_number(rounded));
         if result.len() < trimmed.len() {
             return Some(result);
@@ -117,9 +117,13 @@ fn cleanup_numeric(value: &str, precision: u32) -> Option<String> {
         (trimmed, "")
     };
 
-    let num: f64 = num_str.parse().ok()?;
-    let rounded = round_to(num, precision);
+    let num = parse_svg_number(num_str)?;
+    let rounded = round_to(num, precision)?;
     let result = format_number(rounded);
+    // Never lengthen a value (`1e14` would expand to 15 digits).
+    if result.len() >= trimmed.len() && result != trimmed.trim_end_matches("px") {
+        return None;
+    }
     Some(result)
 }
 
@@ -131,13 +135,20 @@ fn cleanup_viewbox(value: &str, precision: u32) -> Option<String> {
     }
     let mut cleaned = Vec::with_capacity(4);
     for part in &parts {
-        let num: f64 = part.parse().ok()?;
-        cleaned.push(format_number(round_to(num, precision)));
+        let num = parse_svg_number(part)?;
+        cleaned.push(format_number(round_to(num, precision)?));
     }
     Some(cleaned.join(" "))
 }
 
-fn round_to(value: f64, precision: u32) -> f64 {
+/// Round `value` to `precision` decimals. Returns `None` when the value is
+/// too large to round at this precision (`value * 10^precision` overflows);
+/// callers then leave the attribute untouched instead of emitting `inf` or a
+/// 300-digit expansion.
+fn round_to(value: f64, precision: u32) -> Option<f64> {
+    if !representable(value, precision) {
+        return None;
+    }
     let factor = 10f64.powi(precision as i32);
     let rounded = (value * factor).round() / factor;
 
@@ -147,11 +158,11 @@ fn round_to(value: f64, precision: u32) -> f64 {
         let factor_low = 10f64.powi((precision - 1) as i32);
         let rounded_low = (value * factor_low).round() / factor_low;
         if (rounded - rounded_low).abs() < error {
-            return rounded_low;
+            return Some(rounded_low);
         }
     }
 
-    rounded
+    Some(rounded)
 }
 
 /// Format a number, stripping trailing zeros and unnecessary decimal points.
@@ -219,5 +230,28 @@ mod tests {
         assert!(output.contains("width=\"100\""));
         assert!(output.contains("height=\"200\""));
         assert!(output.contains("viewBox=\"0 0 100 200\""));
+    }
+
+    #[test]
+    fn non_finite_and_huge_values_left_untouched() {
+        for v in [
+            "1e999", "-1e999", "inf", "-inf", "nan", "NaN", "infinity", "1e308", "1e400%",
+        ] {
+            assert_eq!(cleanup_numeric(v, 3), None, "{v}");
+        }
+        assert_eq!(cleanup_viewbox("0 0 1e999 1", 3), None);
+        assert_eq!(cleanup_numeric("0.5000", 3).as_deref(), Some(".5"));
+        assert_eq!(round_to(1e308, 3), None);
+        assert_eq!(round_to(1.23456, 3), Some(1.235));
+    }
+
+    #[test]
+    fn never_lengthens_or_repairs_values() {
+        assert_eq!(cleanup_numeric("1e14", 3), None);
+        assert_eq!(cleanup_numeric("1e3", 3), None);
+        assert_eq!(cleanup_numeric("5 px", 3), None);
+        assert_eq!(cleanup_numeric("0.50px", 3).as_deref(), Some(".5"));
+        assert_eq!(cleanup_numeric("10px", 3).as_deref(), Some("10"));
+        assert_eq!(cleanup_numeric("100", 3).as_deref(), Some("100"));
     }
 }

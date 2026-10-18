@@ -61,6 +61,15 @@ pub fn load_config(path: &Path) -> Result<Config, Box<dyn Error>> {
         None => Preset::default(),
     };
 
+    if let Some(p) = raw.precision
+        && p > svgm_core::config::MAX_PRECISION
+    {
+        return Err(Box::new(ConfigError(format!(
+            "precision must be between 0 and {}, got {p}",
+            svgm_core::config::MAX_PRECISION
+        ))));
+    }
+
     let known = svgm_core::config::all_pass_names();
     for name in raw.passes.keys() {
         if !known.contains(&name.as_str()) {
@@ -161,5 +170,14 @@ removeComments = false
     fn find_config_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(find_config(None, dir.path()).is_none());
+    }
+
+    #[test]
+    fn precision_above_max_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("svgm.config.toml");
+        fs::write(&path, "precision = 99").unwrap();
+        let err = load_config(&path).unwrap_err().to_string();
+        assert!(err.contains("precision must be between 0 and 20"), "{err}");
     }
 }

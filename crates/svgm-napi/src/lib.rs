@@ -41,14 +41,35 @@ pub fn optimize(svg: String, options: Option<OptimizeOptions>) -> napi::Result<O
         }
     }
 
+    if let Some(p) = opts.precision
+        && p > svgm_core::config::MAX_PRECISION
+    {
+        return Err(Error::from_reason(format!(
+            "precision must be between 0 and {}",
+            svgm_core::config::MAX_PRECISION
+        )));
+    }
+
     let config = svgm_core::Config {
         preset,
         precision: opts.precision,
         pass_overrides: opts.passes.unwrap_or_default(),
     };
 
-    let result = svgm_core::optimize_with_config(&svg, &config)
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+    // A panic inside the optimizer must surface as a JS exception, not abort
+    // the Node process.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        svgm_core::optimize_with_config(&svg, &config)
+    }))
+    .map_err(|payload| {
+        let msg = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Error::from_reason(format!("internal error while optimizing: {msg}"))
+    })?
+    .map_err(|e| Error::from_reason(e.to_string()))?;
 
     Ok(OptimizeResult {
         data: result.data,

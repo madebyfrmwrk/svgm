@@ -24,10 +24,16 @@ pub struct Config {
     pub pass_overrides: HashMap<String, bool>,
 }
 
+/// Largest precision the rounding passes accept. Beyond this `10^precision`
+/// overflows the arithmetic the passes rely on (NaN at 309, panic at huge
+/// values), so larger requests are clamped.
+pub const MAX_PRECISION: u32 = 20;
+
 impl Config {
-    /// Returns the effective numeric precision for this configuration.
+    /// Returns the effective numeric precision for this configuration,
+    /// clamped to [`MAX_PRECISION`].
     pub fn effective_precision(&self) -> u32 {
-        self.precision.unwrap_or(3)
+        self.precision.unwrap_or(3).min(MAX_PRECISION)
     }
 }
 
@@ -295,5 +301,21 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(config.effective_precision(), 4);
+    }
+
+    #[test]
+    fn precision_is_clamped() {
+        let config = Config {
+            precision: Some(310),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_precision(), MAX_PRECISION);
+        let config = Config {
+            precision: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_precision(), MAX_PRECISION);
+        // Building passes at the clamped precision must not panic.
+        let _ = passes_for_config(&config);
     }
 }

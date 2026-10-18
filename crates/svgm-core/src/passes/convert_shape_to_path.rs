@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, parse_svg_number};
 use crate::ast::{Attribute, Document, NodeKind};
 
 pub struct ConvertShapeToPath {
@@ -368,7 +368,7 @@ fn parse_number_list(s: &str) -> Option<Vec<f64>> {
         }
 
         let num_str = std::str::from_utf8(&chars[start..i]).ok()?;
-        let val: f64 = num_str.parse().ok()?;
+        let val = parse_svg_number(num_str)?;
         nums.push(val);
     }
 
@@ -378,7 +378,7 @@ fn parse_number_list(s: &str) -> Option<Vec<f64>> {
 // --- Helpers ---
 
 fn parse_attr(elem: &crate::ast::Element, name: &str) -> Option<f64> {
-    elem.attr(name).and_then(|v| v.parse::<f64>().ok())
+    elem.attr(name).and_then(parse_svg_number)
 }
 
 fn approx_eq(a: f64, b: f64, precision: u32) -> bool {
@@ -388,7 +388,10 @@ fn approx_eq(a: f64, b: f64, precision: u32) -> bool {
 
 fn fmt(val: f64, precision: u32) -> String {
     let factor = 10f64.powi(precision as i32);
-    let rounded = (val * factor).round() / factor;
+    let mut rounded = (val * factor).round() / factor;
+    if !rounded.is_finite() {
+        rounded = val;
+    }
     if rounded == 0.0 {
         return "0".to_string();
     }

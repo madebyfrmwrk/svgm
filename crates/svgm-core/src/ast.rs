@@ -17,6 +17,7 @@ impl NodeId {
 }
 
 /// Arena-based SVG/XML document.
+#[derive(Clone)]
 pub struct Document {
     pub nodes: Vec<Node>,
     pub root: NodeId,
@@ -88,6 +89,45 @@ impl Document {
             .filter(|&child| !self.nodes[child.index()].removed)
     }
 
+    /// Cheap estimate of the serialized size in bytes, counting only
+    /// non-removed nodes. Used by the optimizer to detect a pass that grows
+    /// the document instead of shrinking it. No allocation.
+    pub fn byte_estimate(&self) -> usize {
+        let mut total = 0usize;
+        for node in &self.nodes {
+            if node.removed {
+                continue;
+            }
+            total += match &node.kind {
+                NodeKind::Root => 0,
+                NodeKind::Element(elem) => {
+                    let mut n = elem.name.len() * 2 + 5; // <name></name>
+                    if let Some(p) = &elem.prefix {
+                        n += (p.len() + 1) * 2;
+                    }
+                    for a in &elem.attributes {
+                        n += a.name.len() + a.value.len() + 4; // ` name="value"`
+                        if let Some(p) = &a.prefix {
+                            n += p.len() + 1;
+                        }
+                    }
+                    for ns in &elem.namespaces {
+                        n += ns.prefix.len() + ns.uri.len() + 10; // ` xmlns:p="uri"`
+                    }
+                    n
+                }
+                NodeKind::Text(t) => t.len(),
+                NodeKind::Comment(t) => t.len() + 7,
+                NodeKind::CData(t) => t.len() + 12,
+                NodeKind::ProcessingInstruction { target, content } => {
+                    target.len() + content.len() + 5
+                }
+                NodeKind::Doctype(t) => t.len() + 11,
+            };
+        }
+        total
+    }
+
     /// Walk the entire tree depth-first, yielding non-removed node ids.
     pub fn traverse(&self) -> Vec<NodeId> {
         let mut result = Vec::new();
@@ -106,6 +146,7 @@ impl Document {
     }
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub kind: NodeKind,
     pub parent: Option<NodeId>,
@@ -113,6 +154,7 @@ pub struct Node {
     pub removed: bool,
 }
 
+#[derive(Clone)]
 pub enum NodeKind {
     Root,
     Element(Element),
@@ -123,6 +165,7 @@ pub enum NodeKind {
     Doctype(String),
 }
 
+#[derive(Clone)]
 pub struct Element {
     pub name: String,
     pub prefix: Option<String>,

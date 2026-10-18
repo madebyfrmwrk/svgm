@@ -58,6 +58,15 @@ pub fn optimize(svg: &str, options: JsValue) -> Result<JsValue, JsError> {
         }
     }
 
+    if let Some(p) = opts.precision
+        && p > svgm_core::config::MAX_PRECISION
+    {
+        return Err(JsError::new(&format!(
+            "precision must be between 0 and {}",
+            svgm_core::config::MAX_PRECISION
+        )));
+    }
+
     let config = svgm_core::Config {
         preset,
         precision: opts.precision,

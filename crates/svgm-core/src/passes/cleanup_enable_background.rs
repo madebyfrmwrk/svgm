@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, parse_svg_number};
 use crate::ast::{Document, NodeKind};
 
 /// Removes or simplifies the deprecated `enable-background` attribute.
@@ -115,8 +115,8 @@ fn try_simplify(value: &str, elem: &crate::ast::Element) -> Option<String> {
         return None;
     }
 
-    let x: f64 = parts[1].parse().ok()?;
-    let y: f64 = parts[2].parse().ok()?;
+    let x = parse_svg_number(parts[1])?;
+    let y = parse_svg_number(parts[2])?;
     if x != 0.0 || y != 0.0 {
         return None;
     }
@@ -128,10 +128,10 @@ fn try_simplify(value: &str, elem: &crate::ast::Element) -> Option<String> {
     let elem_h = elem.attr("height")?;
 
     // Compare as floats to handle equivalent representations
-    let ebw: f64 = eb_w.parse().ok()?;
-    let ebh: f64 = eb_h.parse().ok()?;
-    let ew: f64 = elem_w.parse().ok()?;
-    let eh: f64 = elem_h.parse().ok()?;
+    let ebw = parse_svg_number(eb_w)?;
+    let ebh = parse_svg_number(eb_h)?;
+    let ew = parse_svg_number(elem_w)?;
+    let eh = parse_svg_number(elem_h)?;
 
     if (ebw - ew).abs() < f64::EPSILON && (ebh - eh).abs() < f64::EPSILON {
         Some("new".to_string())

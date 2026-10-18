@@ -260,3 +260,80 @@ fn real_svgs_parse_and_optimize() {
         }
     }
 }
+
+// ── Issue regressions ───────────────────────────────────────────────────
+
+#[test]
+fn issue_22_path_garbage_does_not_hang() {
+    let start = std::time::Instant::now();
+    let out = svgm_core::optimize(
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 e"/><path d="M0 0 L nan nan"/><path d="hello world"/></svg>"#,
+    )
+    .unwrap();
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    // The two truncated paths both become `M0 0` and may then be merged;
+    // what matters is that the valid prefix survives and the garbage is gone.
+    assert!(out.data.contains("M0 0"), "{}", out.data);
+    assert!(!out.data.contains("nan"), "{}", out.data);
+    assert!(out.data.contains(r#"d="hello world""#), "{}", out.data);
+}
+
+#[test]
+fn issue_23_non_ascii_style_is_preserved_and_stable() {
+    let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.ǎccent{fill:red}</style><rect class="ǎccent"/></svg>"#;
+    let out = svgm_core::optimize(input).unwrap();
+    assert!(
+        out.data.len() <= input.len(),
+        "grew: {} -> {}",
+        input.len(),
+        out.data.len()
+    );
+    assert!(out.data.contains("ǎccent"), "{}", out.data);
+    let again = svgm_core::optimize(&out.data).unwrap();
+    assert_eq!(again.data, out.data, "not idempotent");
+
+    let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>text{font-family:"Söhne";content:"→"}</style><text>→ Söhne</text></svg>"#;
+    let out = svgm_core::optimize(input).unwrap();
+    assert!(out.data.contains("font-family:\"Söhne\""), "{}", out.data);
+    assert!(out.data.contains("→ Söhne"), "{}", out.data);
+}
+
+#[test]
+fn issue_24_truncated_input_is_an_error_not_empty_output() {
+    for input in [
+        "<svg",
+        "<svg>",
+        "<svg><g>",
+        "",
+        "  ",
+        "<?xml version=\"1.0\"?>",
+    ] {
+        let result = svgm_core::optimize(input);
+        assert!(result.is_err(), "{input:?} -> {:?}", result.map(|r| r.data));
+    }
+    // Non-svg roots are accepted, as in SVGO.
+    let out = svgm_core::optimize("<?xml version=\"1.0\"?><html><svg/></html>").unwrap();
+    assert_eq!(out.data, "<html><svg></svg></html>");
+}
+
+#[test]
+fn non_finite_numbers_never_reach_the_output() {
+    let input = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1e999 1"><rect width="1e999" height="nan" x="1e308" y="inf"/><path d="M0 0L1e999 5"/><circle cx="1e308" cy="0" r="1"/><g transform="translate(1e308,1e308)"><path d="M0 0h5" transform="scale(1e308)"/></g><polygon points="1e999 1 2 2 3 3"/></svg>"#;
+    let out = svgm_core::optimize(input).unwrap();
+    // Unparseable values are kept verbatim; nothing is ever rewritten into
+    // inf/NaN or a 300-digit expansion.
+    for kept in [
+        "width=\"1e999\"",
+        "height=\"nan\"",
+        "y=\"inf\"",
+        "x=\"1e308\"",
+        "viewBox=\"0 0 1e999 1\"",
+    ] {
+        assert!(out.data.contains(kept), "{kept} missing from {}", out.data);
+    }
+    assert!(!out.data.contains("NaN"), "{}", out.data);
+    assert!(!out.data.contains("100000000000000"), "{}", out.data);
+    assert_eq!(out.data.matches("inf").count(), 1, "{}", out.data);
+    let again = svgm_core::optimize(&out.data).unwrap();
+    assert_eq!(again.data, out.data, "not idempotent");
+}

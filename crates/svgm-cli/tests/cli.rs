@@ -392,3 +392,67 @@ fn config_discovered_from_parent() {
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
+
+// ── Robustness ─────────────────────────────────────────────────────────
+
+#[test]
+fn truncated_input_is_left_untouched() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("t.svg");
+    fs::write(&file, "<svg").unwrap();
+
+    let output = svgm()
+        .arg(&file)
+        .args(["-o", file.to_str().unwrap()])
+        .arg("--no-config")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "should fail on truncated input");
+    assert!(
+        lossy(&output.stderr).contains("unexpected end of input"),
+        "stderr: {}",
+        lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "<svg",
+        "file must not be overwritten"
+    );
+}
+
+#[test]
+fn precision_out_of_range_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let file = write_svg(&dir, "a.svg");
+    let output = svgm()
+        .arg(&file)
+        .args(["--precision", "310", "--stdout", "--no-config"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        lossy(&output.stderr).contains("0..=20"),
+        "stderr: {}",
+        lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bad_path_data_does_not_hang() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("p.svg");
+    fs::write(
+        &file,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 e"/></svg>"#,
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    let output = svgm()
+        .arg(&file)
+        .args(["--stdout", "--no-config"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", lossy(&output.stderr));
+    assert!(start.elapsed().as_secs() < 10);
+    assert!(lossy(&output.stdout).contains(r#"d="M0 0""#));
+}

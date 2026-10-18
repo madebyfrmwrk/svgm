@@ -1,5 +1,5 @@
 use super::convert_path_data::{parse_path, serialize_path};
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, parse_svg_number, representable};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct ConvertTransform {
@@ -38,6 +38,9 @@ impl Pass for ConvertTransform {
                     let Some(matrix) = parse_and_merge_transforms(transform_str) else {
                         continue;
                     };
+                    if !matrix.is_representable(self.precision) {
+                        continue;
+                    }
 
                     if matrix.is_identity(self.precision) {
                         elem.attributes.remove(pos);
@@ -67,6 +70,9 @@ impl Pass for ConvertTransform {
                 let Some(matrix) = parse_and_merge_transforms(transform_str) else {
                     continue;
                 };
+                if !matrix.is_representable(self.precision) {
+                    continue;
+                }
 
                 if matrix.is_identity(self.precision) {
                     elem.attributes.remove(pos);
@@ -214,6 +220,12 @@ impl ConvertTransform {
 
             // Compose and set on child
             let composed = group_matrix.multiply(&child_matrix);
+            if !group_matrix.is_representable(self.precision)
+                || !child_matrix.is_representable(self.precision)
+                || !composed.is_representable(self.precision)
+            {
+                continue;
+            }
             let composed_str = composed.serialize(self.precision);
 
             if let NodeKind::Element(ref mut child_elem) = doc.node_mut(child_id).kind {
@@ -366,6 +378,16 @@ impl Matrix {
         }
     }
 
+    /// True when every entry can be rounded at `precision` without
+    /// overflowing. Composing or parsing huge values can overflow to
+    /// infinity (or to numbers Rust prints as 300-digit expansions); such
+    /// matrices must never be serialized or applied.
+    fn is_representable(&self, precision: u32) -> bool {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
+            .iter()
+            .all(|&v| representable(v, precision))
+    }
+
     fn multiply(&self, other: &Matrix) -> Self {
         Self {
             a: self.a * other.a + self.c * other.b,
@@ -513,7 +535,11 @@ fn approx_eq(a: f64, b: f64, precision: u32) -> bool {
 
 fn fmt(val: f64, precision: u32) -> String {
     let factor = 10f64.powi(precision as i32);
-    let rounded = (val * factor).round() / factor;
+    let mut rounded = (val * factor).round() / factor;
+    if !rounded.is_finite() {
+        // `val * factor` overflowed; keep the unrounded value.
+        rounded = val;
+    }
     if rounded == 0.0 {
         return "0".to_string();
     }
@@ -647,17 +673,19 @@ fn apply_translate_to_element(
             .attributes
             .iter()
             .find(|a| a.name == x_attr && a.prefix.is_none())
-            .map(|a| a.value.parse::<f64>().ok())
+            .map(|a| parse_svg_number(&a.value))
             .unwrap_or(Some(0.0));
         let y_val = elem
             .attributes
             .iter()
             .find(|a| a.name == y_attr && a.prefix.is_none())
-            .map(|a| a.value.parse::<f64>().ok())
+            .map(|a| parse_svg_number(&a.value))
             .unwrap_or(Some(0.0));
 
-        if x_val.is_none() || y_val.is_none() {
-            return false; // Can't parse existing coordinate
+        match (x_val, y_val) {
+            (Some(x), Some(y))
+                if representable(x + tx, precision) && representable(y + ty, precision) => {}
+            _ => return false, // Can't parse existing coordinate, or it would overflow
         }
     }
 
@@ -676,7 +704,7 @@ fn apply_offset(elem: &mut crate::ast::Element, attr_name: &str, offset: f64, pr
         .iter_mut()
         .find(|a| a.name == attr_name && a.prefix.is_none())
     {
-        if let Ok(val) = attr.value.parse::<f64>() {
+        if let Some(val) = parse_svg_number(&attr.value) {
             attr.value = fmt(val + offset, precision);
         }
     } else if !approx_eq(offset, 0.0, precision) {
@@ -715,8 +743,10 @@ fn normalize_european_decimals(s: &str) -> String {
         return s.to_string();
     }
 
-    // Replace digit,digit commas with dots; keep comma+space as arg separators
-    let mut result = String::with_capacity(s.len());
+    // Replace digit,digit commas with dots; keep comma+space as arg separators.
+    // Work on bytes and copy everything else verbatim so non-ASCII content is
+    // never re-encoded (same bug class as issue #23).
+    let mut result: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b','
@@ -725,13 +755,13 @@ fn normalize_european_decimals(s: &str) -> String {
             && i + 1 < bytes.len()
             && bytes[i + 1].is_ascii_digit()
         {
-            result.push('.');
+            result.push(b'.');
         } else {
-            result.push(bytes[i] as char);
+            result.push(bytes[i]);
         }
         i += 1;
     }
-    result
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
 }
 
 fn skip_ws(chars: &mut std::iter::Peekable<std::str::Chars>) {
@@ -809,7 +839,7 @@ fn parse_num(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f64> {
             }
         }
     }
-    s.parse().ok()
+    s.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 #[cfg(test)]
@@ -1129,5 +1159,35 @@ mod tests {
             "full optimize should collapse group: {}",
             result.data
         );
+    }
+
+    #[test]
+    fn european_decimal_normalizer_preserves_non_ascii() {
+        assert_eq!(
+            normalize_european_decimals("translate(0,7282, 0,9693)"),
+            "translate(0.7282, 0.9693)"
+        );
+        // Same byte-as-char bug class as issue #23: non-ASCII must survive.
+        assert_eq!(
+            normalize_european_decimals("translate(0,7282, 0,9693) ǎ"),
+            "translate(0.7282, 0.9693) ǎ"
+        );
+    }
+
+    #[test]
+    fn huge_or_non_finite_transform_values_left_untouched() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
+            <g transform=\"translate(1e308,1e308)\"><g transform=\"translate(1e308,1e308)\"><path d=\"M0 0h5\"/></g></g>\
+            <rect transform=\"rotate(1e999)\" width=\"1\" height=\"1\"/>\
+            <rect transform=\"translate(1e308,0)\" x=\"5\" width=\"1\" height=\"1\"/>\
+            </svg>";
+        let mut doc = parse(input).unwrap();
+        let _ = ConvertTransform::default().run(&mut doc);
+        let out = serialize(&doc);
+        assert!(!out.contains("inf") && !out.contains("NaN"), "{out}");
+        assert!(!out.contains("100000000000"), "{out}");
+        assert!(out.contains("rotate(1e999)"), "{out}");
+        assert!(out.contains("translate(1e308,1e308)"), "{out}");
+        assert!(out.contains("x=\"5\""), "{out}");
     }
 }

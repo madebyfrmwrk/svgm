@@ -62,11 +62,22 @@ pub(crate) fn shorten_color(value: &str) -> Option<String> {
     // Normalize to #rrggbb first
     let hex6 = if let Some(rgb) = parse_rgb(trimmed) {
         Some(format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2))
-    } else if trimmed.starts_with('#') && trimmed.len() == 7 {
-        Some(trimmed.to_lowercase())
-    } else if trimmed.starts_with('#') && trimmed.len() == 4 {
-        let c: Vec<char> = trimmed.chars().collect();
-        Some(format!("#{0}{0}{1}{1}{2}{2}", c[1], c[2], c[3]).to_lowercase())
+    } else if let Some(hex) = trimmed.strip_prefix('#') {
+        // Validate on bytes before indexing: only `#rgb` / `#rrggbb` made of
+        // ASCII hex digits are colors. Anything else (`#GGG`, `#12345`,
+        // `#aǎ`) is left alone — indexing a char Vec by byte length used to
+        // panic on multi-byte input.
+        let b = hex.as_bytes();
+        if (b.len() == 6 || b.len() == 3) && b.iter().all(u8::is_ascii_hexdigit) {
+            if b.len() == 6 {
+                Some(trimmed.to_ascii_lowercase())
+            } else {
+                let (r, g, b) = (b[0] as char, b[1] as char, b[2] as char);
+                Some(format!("#{r}{r}{g}{g}{b}{b}").to_ascii_lowercase())
+            }
+        } else {
+            None
+        }
     } else {
         named_to_hex(trimmed).map(|hex| hex.to_string())
     };
@@ -181,7 +192,7 @@ fn hex_to_shorter_name(hex: &str) -> Option<&'static str> {
         "#000080" => Some("navy"),
         "#008080" => Some("teal"),
         "#808000" => Some("olive"),
-        "#800080" => Some("plum"), // wait, plum is #dda0dd, not #800080. Let me be careful here
+        "#800080" => Some("purple"),
         _ => None,
     }
 }
@@ -236,5 +247,39 @@ mod tests {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="none" stroke="url(#grad)"/></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(ConvertColors.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn invalid_hex_left_alone() {
+        // `#aǎ` used to panic (char Vec indexed by byte length); the others
+        // were rewritten into nonsense like `#gggggg`.
+        for v in [
+            "#aǎ", "#ǎa", "#ǎǎǎ", "#ggg", "#GGG", "#12345", "#1234567", "#", "#ab",
+        ] {
+            assert_eq!(shorten_color(v), None, "{v}");
+        }
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"#aǎ\" style=\"fill:#aǎ;stroke:#GGG\"/><style>.a{fill:#aǎ}</style></svg>";
+        let mut doc = parse(input).unwrap();
+        let result = ConvertColors.run(&mut doc);
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
+    }
+
+    #[test]
+    fn purple_is_purple_not_plum() {
+        assert_eq!(shorten_color("#800080").as_deref(), Some("purple"));
+        assert_eq!(shorten_color("rgb(128,0,128)").as_deref(), Some("purple"));
+        assert_eq!(shorten_color("purple"), None);
+        assert_eq!(shorten_color("#dda0dd"), None);
+    }
+
+    #[test]
+    fn color_tables_are_consistent() {
+        // Every hex → name entry must map back to the same hex, so a wrong
+        // mapping (purple → plum, shipped in 0.3.x) can never recur.
+        for hex in ["#ff0000", "#000080", "#008080", "#808000", "#800080"] {
+            let name = hex_to_shorter_name(hex).unwrap_or_else(|| panic!("{hex} missing"));
+            assert_eq!(named_to_hex(name), Some(hex), "{hex} -> {name}");
+        }
     }
 }

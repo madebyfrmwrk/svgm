@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, representable};
 use crate::ast::{Document, NodeKind};
 
 pub struct ConvertPathData {
@@ -74,6 +74,16 @@ fn optimize_path(d: &str, precision: u32) -> Option<String> {
 
     // Phase 5: Simplify arc radii (round equal rx/ry to lower precision when safe)
     let commands = simplify_arc_radii(commands, precision);
+
+    // Never emit `inf`/`NaN` or 300-digit expansions into path data
+    // (arithmetic on huge coordinates can overflow even though the parser
+    // rejects non-finite input, and rounding overflows before that).
+    if commands
+        .iter()
+        .any(|c| c.args.iter().any(|&a| !representable(a, precision)))
+    {
+        return None;
+    }
 
     // Serialize with optimal formatting
     let result = serialize_path(&commands, precision);
@@ -879,12 +889,41 @@ fn next_is_close(commands: &[PathCmd], from: usize) -> bool {
 }
 
 /// Parse a path `d` string into a list of commands.
+///
+/// Error recovery follows browsers and SVGO: parsing stops at the first
+/// token that cannot be consumed (a stray letter, a malformed number, an
+/// incomplete argument group, a bad arc flag) and the valid prefix is
+/// returned. Returns `None` when there is no leading command letter or when
+/// nothing could be parsed before the bad token, so callers leave the
+/// attribute untouched. Numbers follow the SVG grammar: `1e` / `1e+` with no
+/// exponent digits are malformed (as in browsers), whereas SVGO's
+/// `parseFloat` would read them as `1`.
+///
+/// Use [`parse_path_strict`] when the caller re-emits the *original* string
+/// rather than the parsed commands, so a truncated tail can never be copied
+/// along.
 pub(crate) fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
+    parse_path_inner(d).map(|(commands, _)| commands)
+}
+
+/// Like [`parse_path`] but returns `None` if any part of the input could not
+/// be parsed, instead of returning the valid prefix.
+pub(crate) fn parse_path_strict(d: &str) -> Option<Vec<PathCmd>> {
+    match parse_path_inner(d) {
+        Some((commands, false)) => Some(commands),
+        _ => None,
+    }
+}
+
+/// Returns the parsed commands and whether parsing stopped early.
+fn parse_path_inner(d: &str) -> Option<(Vec<PathCmd>, bool)> {
     let mut commands = Vec::new();
     let mut chars = d.chars().peekable();
     let mut current_cmd: Option<char> = None;
+    // Set when parsing stopped early because of an unconsumable token.
+    let mut truncated = false;
 
-    while chars.peek().is_some() {
+    'outer: while chars.peek().is_some() {
         // Skip whitespace and commas
         skip_ws_comma(&mut chars);
 
@@ -901,7 +940,15 @@ pub(crate) fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
             skip_ws_comma(&mut chars);
         }
 
-        let mut cmd = current_cmd?;
+        let Some(mut cmd) = current_cmd else {
+            // A number (or garbage) with no command in effect: either the path
+            // does not start with a command letter, or junk follows a Z.
+            if commands.is_empty() {
+                return None;
+            }
+            truncated = true;
+            break 'outer;
+        };
         let arg_count = args_for_command(cmd);
 
         if arg_count == 0 {
@@ -939,15 +986,19 @@ pub(crate) fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
                         args.push(if c == '1' { 1.0 } else { 0.0 });
                         continue;
                     }
-                    return None; // invalid arc flag
+                    // Invalid arc flag: stop parsing, keep the valid prefix.
+                    truncated = true;
+                    break 'outer;
                 }
                 if let Some(n) = parse_number(&mut chars) {
                     args.push(n);
-                } else if i == 0 {
-                    // No more arguments for this command — break out
-                    break;
                 } else {
-                    return None; // incomplete command
+                    // Not a number, not a command letter and not EOF (both were
+                    // checked above): the char would never be consumed, so stop
+                    // here instead of looping forever (issue #22). An
+                    // incomplete argument group is dropped the same way.
+                    truncated = true;
+                    break 'outer;
                 }
             }
 
@@ -968,7 +1019,12 @@ pub(crate) fn parse_path(d: &str) -> Option<Vec<PathCmd>> {
         }
     }
 
-    Some(commands)
+    if truncated && commands.is_empty() {
+        // Nothing usable before the bad token: leave the attribute alone.
+        return None;
+    }
+
+    Some((commands, truncated))
 }
 
 /// Convert absolute commands to relative where the relative form is shorter.
@@ -1371,8 +1427,13 @@ pub(crate) fn serialize_path(commands: &[PathCmd], precision: u32) -> String {
     for cmd in commands {
         let c = cmd.cmd;
 
-        // Omit repeated command letters (implicit repeat)
-        let emit_cmd = if prev_cmd == Some(c) {
+        // Omit repeated command letters (implicit repeat). Never for M/m: a
+        // repeated moveto's letter is mandatory, since `M1 1 50 50` means
+        // "move, then *line to*" (consecutive movetos used to be serialized
+        // as implicit linetos and drew a stray segment).
+        let emit_cmd = if c == 'M' || c == 'm' {
+            true
+        } else if prev_cmd == Some(c) {
             // Same command — can omit the letter
             false
         } else if prev_cmd == Some('M') && c == 'L' {
@@ -1450,6 +1511,11 @@ fn needs_separator_before(out: &str, next: &str) -> bool {
 fn round_and_format(val: f64, precision: u32) -> String {
     let factor = 10f64.powi(precision as i32);
     let rounded = (val * factor).round() / factor;
+    if !rounded.is_finite() {
+        // `val * factor` overflowed (huge coordinate at high precision);
+        // fall back to the unrounded value rather than printing `inf`.
+        return format_num(val);
+    }
 
     // "strongRound": try precision-1 and use it if error is acceptable
     if precision > 0 {
@@ -1596,7 +1662,9 @@ fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<f64>
         }
     }
 
-    s.parse().ok()
+    // Reject overflow (`1e999` parses as inf) so no non-finite value enters
+    // the pipeline.
+    s.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 #[cfg(test)]
@@ -1948,5 +2016,96 @@ mod tests {
         // Should converge
         let second = optimize_path(&result, 3).unwrap();
         assert_eq!(result, second, "should converge: {result}");
+    }
+
+    #[test]
+    fn issue_22_unconsumable_token_keeps_valid_prefix() {
+        // Used to loop forever allocating (issue #22).
+        let cmds = parse_path("M0 0 e").unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(optimize_path("M0 0 e", 3).as_deref(), Some("M0 0"));
+
+        // Valid prefix kept, garbage and everything after it dropped.
+        let cmds = parse_path("M0 0 10 20 e 5 5").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "ML");
+        assert_eq!(cmds[1].args, vec![10.0, 20.0]);
+
+        // Trailing dash, incomplete group, bad arc flag, stray symbol all stop cleanly.
+        assert_eq!(parse_path("M0 0 -").unwrap().len(), 1);
+        assert_eq!(parse_path("M0 0L10").unwrap().len(), 1);
+        assert_eq!(parse_path("M0 0a1 1 0 2 0 5 5").unwrap().len(), 1);
+        assert_eq!(parse_path("M0 0c0,0,0$0,0,0").unwrap().len(), 1);
+        assert_eq!(parse_path("M0 0 L nan nan").unwrap().len(), 1);
+
+        // Nothing usable before the garbage → None (attribute left alone).
+        assert!(parse_path("e").is_none());
+        assert!(parse_path("hello world").is_none());
+        assert!(parse_path("10 20").is_none());
+
+        // End to end through the pass.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0 e\"/><path d=\"hello world\"/></svg>";
+        let mut doc = parse_svg(input).unwrap();
+        ConvertPathData::default().run(&mut doc);
+        let out = serialize(&doc);
+        assert!(out.contains("d=\"M0 0\""), "{out}");
+        assert!(out.contains("d=\"hello world\""), "{out}");
+    }
+
+    #[test]
+    fn parse_path_terminates_on_every_byte() {
+        for b in 0x20u8..=0x7Eu8 {
+            let c = b as char;
+            let _ = parse_path(&format!("M0 0 {c}"));
+            let _ = parse_path(&format!("M0 0 L5 5 {c} 1 2"));
+            let _ = optimize_path(&format!("M0 0 L5 5{c}1 2 L9 9"), 3);
+        }
+        for c in ['٣', '５', 'ǎ', '€', '\u{feff}'] {
+            let _ = parse_path(&format!("M0 0 {c}"));
+            let _ = parse_path(&format!("M0 0 L{c}5 5"));
+        }
+    }
+
+    #[test]
+    fn non_finite_and_huge_numbers_never_serialized() {
+        // Overflowing literals are rejected by the number parser.
+        assert_eq!(parse_path("M0 0L1e999 5").unwrap().len(), 1);
+        assert!(parse_path("M1e999 0").is_none());
+        // Finite but unroundable values leave the path untouched.
+        assert!(optimize_path("M0 0L1e308 5", 3).is_none());
+        for d in ["M0 0L1e999 5", "M0 0L1e308 5", "M1e300 1e300l1e300 1e300"] {
+            if let Some(out) = optimize_path(d, 3) {
+                assert!(!out.contains("inf") && !out.contains("NaN"), "{d} -> {out}");
+                assert!(!out.contains("100000000000"), "{d} -> {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_movetos_keep_their_letter() {
+        // `M1 1 50 50` means move then LINE to (50,50): a repeated M must
+        // never be collapsed into an implicit lineto.
+        let cmds = parse_path("M1 1M50 50L20 20").unwrap();
+        let out = serialize_path(&cmds, 3);
+        assert!(out.starts_with("M1 1M50 50"), "{out}");
+        let cmds = parse_path("m1 1m50 50l20 20").unwrap();
+        let out = serialize_path(&cmds, 3);
+        assert!(out.starts_with("m1 1m50 50"), "{out}");
+        // Round trip: re-parsing the output yields the same command sequence.
+        let reparsed = parse_path(&out).unwrap();
+        assert_eq!(reparsed.len(), 3);
+        assert_eq!(reparsed[1].cmd, 'm');
+    }
+
+    #[test]
+    fn garbage_after_closepath_keeps_prefix_and_strict_rejects_it() {
+        let cmds = parse_path("M0 0 L5 5 z xyz").unwrap();
+        assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "MLz");
+        assert_eq!(parse_path("M0 0 L5 5 Z 5 5").unwrap().len(), 3);
+        assert!(parse_path_strict("M0 0 L5 5 z xyz").is_none());
+        assert!(parse_path_strict("M0 0 e").is_none());
+        assert!(parse_path_strict("M0 0 L10").is_none());
+        assert_eq!(parse_path_strict("M0 0 L5 5z").unwrap().len(), 3);
+        // Exponent without digits is malformed (SVG grammar), parsing stops there.
+        assert_eq!(parse_path("M0 0 L5 1e").unwrap().len(), 1);
     }
 }

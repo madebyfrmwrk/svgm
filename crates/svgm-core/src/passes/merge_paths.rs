@@ -1,4 +1,4 @@
-use super::convert_path_data::{PathCmd, parse_path};
+use super::convert_path_data::{PathCmd, parse_path_strict};
 use super::{Pass, PassResult};
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -448,9 +448,11 @@ impl PathPoints {
 }
 
 /// Parse a path `d` string and gather sample points per subpath.
-/// Returns None if the path cannot be parsed.
+/// Returns None if the path cannot be parsed *in full*: the merged `d` is
+/// built from the original strings, so a path with an unparseable tail must
+/// never be merged (the garbage would sit mid-path and hide the next shape).
 fn gather_points(d: &str) -> Option<PathPoints> {
-    let commands = parse_path(d)?;
+    let commands = parse_path_strict(d)?;
     if commands.is_empty() {
         return None;
     }
@@ -1404,5 +1406,26 @@ mod tests {
             intersects(&p1, &p2),
             "McDonald's arch paths should be detected as overlapping"
         );
+    }
+
+    #[test]
+    fn truncated_paths_are_never_merged() {
+        // The merged `d` is built from the original strings, so a path whose
+        // tail could not be parsed must stay separate: `L10 M50 50` would
+        // hide the second shape in every browser.
+        for bad in [
+            "M0 0 L5 5 L10",
+            "M0 0 L5 5 e",
+            "M0 0 L5 5 L1e300 1e300 L10",
+            "M1 1l5",
+        ] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{bad}\"/><path d=\"M50 50 L60 60 L50 60z\"/></svg>"
+            );
+            let mut doc = crate::parser::parse(&input).unwrap();
+            let result = MergePaths.run(&mut doc);
+            assert_eq!(result, PassResult::Unchanged, "{bad}");
+            assert_eq!(crate::serializer::serialize(&doc), input);
+        }
     }
 }

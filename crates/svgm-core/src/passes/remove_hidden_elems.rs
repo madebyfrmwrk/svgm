@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, parse_svg_number};
 use crate::ast::{Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -195,13 +195,13 @@ fn is_explicit_zero(value: Option<&str>) -> bool {
 
 /// Check if a string value represents zero.
 fn is_zero(v: &str) -> bool {
-    v.trim().trim_end_matches("px").parse::<f64>() == Ok(0.0)
+    parse_svg_number(v.trim().trim_end_matches("px")) == Some(0.0)
 }
 
 /// Parse a coordinate attribute, defaulting to 0.0 per SVG spec.
 fn parse_coord(value: Option<&str>) -> f64 {
     value
-        .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
+        .and_then(|v| parse_svg_number(v.trim().trim_end_matches("px")))
         .unwrap_or(0.0)
 }
 

@@ -222,15 +222,18 @@ impl Pass for InlineStyles {
                             .iter_mut()
                             .find(|a| a.name == *prop && a.prefix.is_none())
                         {
-                            attr.value = val.clone();
+                            if attr.value != *val {
+                                attr.value = val.clone();
+                                any_inlined = true;
+                            }
                         } else {
                             elem.attributes.push(Attribute {
                                 prefix: None,
                                 name: prop.clone(),
                                 value: val.clone(),
                             });
+                            any_inlined = true;
                         }
-                        any_inlined = true;
                     }
                 }
 
