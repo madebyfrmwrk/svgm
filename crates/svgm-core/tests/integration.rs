@@ -480,3 +480,94 @@ fn unsafe_deprecated_attrs_survive_both_presets() {
         assert!(output.contains("BackgroundImage"), "{preset:?}: {output}");
     }
 }
+
+#[test]
+fn empty_conditional_attrs() {
+    // Empty requiredFeatures/requiredExtensions/systemLanguage evaluate to
+    // false and hide the element; stripping them (SVGO removeEmptyAttrs.02)
+    // would make hidden content visible.
+    let input =
+        fs::read_to_string("tests/fixtures/regression/empty_conditional_attrs.svg").unwrap();
+    for (preset, output) in optimize_both_presets(&input) {
+        assert_valid_svg(&output, "empty_conditional_attrs");
+        assert_eq!(
+            output.matches("requiredFeatures=\"\"").count(),
+            1,
+            "{preset:?}: {output}"
+        );
+        assert_eq!(
+            output.matches("requiredExtensions=\"\"").count(),
+            1,
+            "{preset:?}: {output}"
+        );
+        assert_eq!(
+            output.matches("systemLanguage=\"\"").count(),
+            2,
+            "{preset:?}: {output}"
+        );
+        // Every shape stays hidden: it, or an ancestor, carries one of the
+        // conditional attributes (collapseGroups may push it onto the shape).
+        use svgm_core::ast::{Document, NodeId, NodeKind};
+        fn walk(doc: &Document, id: NodeId, hidden: bool, preset: &str, output: &str) {
+            let mut hidden = hidden;
+            if let NodeKind::Element(ref elem) = doc.node(id).kind {
+                hidden |= elem.attributes.iter().any(|a| {
+                    matches!(
+                        a.name.as_str(),
+                        "requiredFeatures" | "requiredExtensions" | "systemLanguage"
+                    ) && a.value.is_empty()
+                });
+                if matches!(elem.name.as_str(), "rect" | "path") {
+                    assert!(hidden, "{preset}: <{}> became visible: {output}", elem.name);
+                }
+            }
+            for child in doc.children(id) {
+                walk(doc, child, hidden, preset, output);
+            }
+        }
+        let doc = svgm_core::parser::parse(&output).unwrap();
+        walk(&doc, doc.root, false, &format!("{preset:?}"), &output);
+        assert_eq!(
+            output.matches("<rect").count() + output.matches("<path").count(),
+            4,
+            "{preset:?}: {output}"
+        );
+    }
+}
+
+#[test]
+fn processing_instructions_and_license_comments_survive_both_presets() {
+    // SVGO removeXMLProcInst only drops the XML declaration; removeComments
+    // keeps `<!--! ... -->` (its default preservePatterns).
+    let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n<!--!Icon Font v1 by @iconfont - Copyright 2023 Icon Font CIC.-->\n<!-- Generator: Adobe Illustrator -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><?foo bar?><!-- plain --><rect width=\"1\" height=\"1\"/></svg>";
+    for (preset, output) in optimize_both_presets(input) {
+        assert!(!output.contains("<?xml "), "{preset:?}: {output}");
+        assert!(!output.contains("Generator"), "{preset:?}: {output}");
+        assert!(!output.contains("plain"), "{preset:?}: {output}");
+        assert!(
+            output.starts_with("<?xml-stylesheet href=\"style.css\" type=\"text/css\"?><!--!Icon Font v1 by @iconfont - Copyright 2023 Icon Font CIC.--><svg"),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("<?foo bar?>"), "{preset:?}: {output}");
+        let config = svgm_core::Config {
+            preset,
+            ..Default::default()
+        };
+        let again = svgm_core::optimize_with_config(&output, &config).unwrap();
+        assert_eq!(again.data, output, "{preset:?}: not idempotent");
+    }
+    // Disabling removeProcInst round-trips the declaration.
+    let config = svgm_core::Config {
+        pass_overrides: [("removeProcInst".to_string(), false)]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let output = svgm_core::optimize_with_config(input, &config)
+        .unwrap()
+        .data;
+    assert!(
+        output.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><?xml-stylesheet"),
+        "{output}"
+    );
+}

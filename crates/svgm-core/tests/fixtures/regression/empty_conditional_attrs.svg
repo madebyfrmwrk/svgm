@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 10">
+  <!-- An empty conditional processing attribute evaluates to false: none of
+       these shapes render, and they must stay hidden after optimisation. -->
+  <g requiredFeatures=""><rect width="10" height="10"/></g>
+  <g systemLanguage=""><rect x="10" width="10" height="10"/></g>
+  <g requiredExtensions=""><rect x="20" width="10" height="10"/></g>
+  <rect x="5" y="5" width="2" height="2" systemLanguage="" fill="red"/>
+</svg>
