@@ -1,4 +1,4 @@
-use super::{Pass, PassResult, parse_svg_number, representable};
+use super::{Pass, PassResult, parse_svg_number, representable, strong_round};
 use crate::ast::{Document, NodeKind};
 
 /// Attributes whose values are numeric and can be cleaned up.
@@ -149,20 +149,7 @@ fn round_to(value: f64, precision: u32) -> Option<f64> {
     if !representable(value, precision) {
         return None;
     }
-    let factor = 10f64.powi(precision as i32);
-    let rounded = (value * factor).round() / factor;
-
-    // "strongRound": try precision-1 and use it if error is acceptable
-    if precision > 0 {
-        let error = 10f64.powi(-(precision as i32));
-        let factor_low = 10f64.powi((precision - 1) as i32);
-        let rounded_low = (value * factor_low).round() / factor_low;
-        if (rounded - rounded_low).abs() < error {
-            return Some(rounded_low);
-        }
-    }
-
-    Some(rounded)
+    Some(strong_round(value, precision))
 }
 
 /// Format a number, stripping trailing zeros and unnecessary decimal points.

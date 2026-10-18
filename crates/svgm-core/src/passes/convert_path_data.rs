@@ -1,5 +1,6 @@
 use super::{
-    Computed, Pass, PassResult, computed_style_with, representable, stylesheet_declarations,
+    Computed, Pass, PassResult, computed_style_with, representable, strong_round,
+    stylesheet_declarations,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -1683,25 +1684,9 @@ fn needs_separator_before(out: &str, next: &str) -> bool {
 }
 
 fn round_and_format(val: f64, precision: u32) -> String {
-    let factor = 10f64.powi(precision as i32);
-    let rounded = (val * factor).round() / factor;
-    if !rounded.is_finite() {
-        // `val * factor` overflowed (huge coordinate at high precision);
-        // fall back to the unrounded value rather than printing `inf`.
-        return format_num(val);
-    }
-
-    // "strongRound": try precision-1 and use it if error is acceptable
-    if precision > 0 {
-        let error = 10f64.powi(-(precision as i32));
-        let factor_low = 10f64.powi((precision - 1) as i32);
-        let rounded_low = (val * factor_low).round() / factor_low;
-        if (rounded - rounded_low).abs() < error {
-            return format_num(rounded_low);
-        }
-    }
-
-    format_num(rounded)
+    // strongRound; a value whose `val * 10^precision` overflows comes back
+    // unrounded rather than as `inf`.
+    format_num(strong_round(val, precision))
 }
 
 fn format_num(val: f64) -> String {
@@ -2283,6 +2268,35 @@ mod tests {
     }
 
     #[test]
+    fn strong_round_compares_candidate_with_original() {
+        // SVGO strongRound: drop a decimal only when that loses < 10^-p
+        // against the *original* value.
+        for (v, expected) in [
+            (5.0009, "5"),
+            (1.0014, "1.001"),
+            (1.00149, "1.001"),
+            (7.0006, "7"),
+            (3.0014, "3.001"),
+            (5.0005, "5"),
+            (2.3491, "2.35"),
+            (18.079, "18.079"),
+            (-18.079, "-18.079"),
+            (-0.1505, "-.15"),
+        ] {
+            assert_eq!(round_and_format(v, 3), expected, "{v}");
+        }
+        assert_eq!(round_and_format(1.96545901, 8), "1.96545901");
+        assert_eq!(round_and_format(5.01352941, 8), "5.01352941");
+        assert_eq!(round_and_format(1.5, 0), "2");
+        // SVGO convertPathData.14 row 1: the kappa circle quadrant's radius
+        // comes out as 5.0005 and must print as 5 for the arc to be worth it.
+        assert_eq!(
+            optimize_path("M0 0c2.761 0 5 2.239 5 5", 3).unwrap(),
+            "M0 0A5 5 0 0 1 5 5"
+        );
+    }
+
+    #[test]
     fn arc_radius_rounding_uses_relative_chord() {
         // Absolute `A`: the chord is end - current point, not the raw end
         // point. Rounding 50.4 -> 50 would change the sagitta by 0.06.
@@ -2312,8 +2326,7 @@ mod tests {
         // Short chord, visible bulge (~0.07 units): stays a curve (SVGO:
         // `M0 0q.15-.15.002.002`).
         let out = optimize_path("M0 0C.1-.1 .1-.1 .002 .002", 3).unwrap();
-        assert!(out.starts_with("M0 0Q.15-.15"), "{out}");
-        assert!(!out.contains("M0 0 .002"), "{out}");
+        assert_eq!(out, "M0 0Q.15-.15.002.002");
         // SVGO convertPathData.17 at precision 8: a long near-straight curve
         // (control point 7e-9 off the chord) becomes a line.
         let out = optimize_path(
@@ -2321,9 +2334,7 @@ mod tests {
             8,
         )
         .unwrap();
-        assert!(out.starts_with("M33.027833 1.965459"), "{out}");
-        assert!(out.contains("l5.0135294 5.0135294"), "{out}");
-        assert!(!out.contains('c') && !out.contains('C'), "{out}");
+        assert_eq!(out, "M33.027833 1.96545901l5.0135294 5.01352941");
         // Genuinely straight control points still collapse at p=3.
         assert_eq!(optimize_path("M0 0C1 1 2 2 3 3", 3).unwrap(), "M0 0 3 3");
     }
@@ -2346,6 +2357,9 @@ mod tests {
             ("M10 50L10 10L10 80", "M10 50V10v70"),
             ("M10 50L80 50L0 50", "M10 50h70H0"),
             ("M10 50L0 50L80 50", "M10 50H0h80"),
+            // SVGO convertPathData.28 (SVGO additionally emits the last
+            // segment as `z`): the V/v pair must survive.
+            ("M6 32.845 6 14.766 6 32.845", "M6 32.845V14.766v18.079"),
         ] {
             let out = optimize_path(input, 3).unwrap_or_else(|| input.to_string());
             assert_eq!(out, expected, "{input}");
