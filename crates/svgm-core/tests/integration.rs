@@ -337,3 +337,46 @@ fn non_finite_numbers_never_reach_the_output() {
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 }
+
+// ── WP3 regression fixtures ─────────────────────────────────────────────
+
+fn optimize_fixture_both_presets(name: &str) -> (String, String) {
+    let path = format!("tests/fixtures/regression/{name}");
+    let input = fs::read_to_string(&path).unwrap();
+    let default = svgm_core::optimize(&input).unwrap().data;
+    let safe = svgm_core::optimize_with_config(
+        &input,
+        &svgm_core::Config {
+            preset: svgm_core::Preset::Safe,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .data;
+    assert_valid_svg(&default, name);
+    assert_valid_svg(&safe, name);
+    (default, safe)
+}
+
+#[test]
+fn regression_cdata_text() {
+    let (default, safe) = optimize_fixture_both_presets("cdata_text.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // <text>/<tspan> whose only content is a CDATA section are not empty.
+        assert_eq!(
+            output.matches("<text").count(),
+            3,
+            "{preset}: all three text elements must survive: {output}"
+        );
+        assert!(
+            output.contains("a &lt; b &amp; c") || output.contains("<![CDATA[a < b & c]]>"),
+            "{preset}: CDATA content must survive: {output}"
+        );
+        assert!(output.contains("second"), "{preset}: {output}");
+        // Whitespace between words inside <a> nested in <text> is rendered.
+        assert!(
+            output.contains("<tspan>read</tspan> <tspan>more</tspan>"),
+            "{preset}: space between words must survive: {output}"
+        );
+    }
+}
