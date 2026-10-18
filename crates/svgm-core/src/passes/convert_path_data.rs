@@ -1411,47 +1411,123 @@ fn simplify_arc_radii(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
         return commands;
     }
     let error = 10f64.powi(-(precision as i32));
+    let mut result = Vec::with_capacity(commands.len());
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
 
-    commands
-        .into_iter()
-        .map(|mut cmd| {
-            if matches!(cmd.cmd, 'A' | 'a') && cmd.args.len() >= 7 {
-                let rx = cmd.args[0];
-                let ry = cmd.args[1];
-                let large_arc = cmd.args[3];
+    for mut cmd in commands {
+        if matches!(cmd.cmd, 'A' | 'a') && cmd.args.len() >= 7 {
+            // The sagitta needs the chord *vector*; for an absolute `A` the
+            // end point must be taken relative to the current point (SVGO's
+            // calculateSagitta only ever sees relative data).
+            let (dx, dy) = if cmd.cmd == 'A' {
+                (cmd.args[5] - cx, cmd.args[6] - cy)
+            } else {
+                (cmd.args[5], cmd.args[6])
+            };
+            round_arc_radius(&mut cmd, dx, dy, precision, error);
+        }
+        advance_point(&cmd, &mut cx, &mut cy, &mut sx, &mut sy);
+        result.push(cmd);
+    }
+    result
+}
 
-                // Only simplify circular arcs (rx ≈ ry), skip large-arc (sagitta undefined)
-                if (rx - ry).abs() < error && large_arc != 1.0 && rx > 0.0 {
-                    let dx = cmd.args[5];
-                    let dy = cmd.args[6];
-                    let chord = (dx * dx + dy * dy).sqrt();
+/// Round a circular arc's radius to the lowest precision whose sagitta stays
+/// within `error` of the original (SVGO smartArcRounding). `(dx, dy)` is the
+/// chord vector from the arc's start point to its end point.
+fn round_arc_radius(cmd: &mut PathCmd, dx: f64, dy: f64, precision: u32, error: f64) {
+    let rx = cmd.args[0];
+    let ry = cmd.args[1];
+    let large_arc = cmd.args[3];
 
-                    // Skip if chord > diameter (invalid arc)
-                    if chord <= rx * 2.0 {
-                        let sagitta = rx - (rx * rx - 0.25 * chord * chord).max(0.0).sqrt();
+    // Only simplify circular arcs (rx ≈ ry), skip large-arc (sagitta undefined)
+    if (rx - ry).abs() >= error || large_arc == 1.0 || rx <= 0.0 {
+        return;
+    }
+    let chord = (dx * dx + dy * dy).sqrt();
+    // Skip if chord > diameter (invalid arc)
+    if chord > rx * 2.0 {
+        return;
+    }
+    let sagitta = rx - (rx * rx - 0.25 * chord * chord).max(0.0).sqrt();
 
-                        // Try progressively lower precision
-                        for p in (0..precision).rev() {
-                            let factor = 10f64.powi(p as i32);
-                            let rounded = (rx * factor).round() / factor;
-                            if rounded <= 0.0 || chord > rounded * 2.0 {
-                                break;
-                            }
-                            let new_sagitta = rounded
-                                - (rounded * rounded - 0.25 * chord * chord).max(0.0).sqrt();
-                            if (sagitta - new_sagitta).abs() < error {
-                                cmd.args[0] = rounded;
-                                cmd.args[1] = rounded;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            cmd
-        })
-        .collect()
+    // Try progressively lower precision
+    for p in (0..precision).rev() {
+        let factor = 10f64.powi(p as i32);
+        let rounded = (rx * factor).round() / factor;
+        if rounded <= 0.0 || chord > rounded * 2.0 {
+            break;
+        }
+        let new_sagitta = rounded - (rounded * rounded - 0.25 * chord * chord).max(0.0).sqrt();
+        if (sagitta - new_sagitta).abs() < error {
+            cmd.args[0] = rounded;
+            cmd.args[1] = rounded;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Advance the current point `(cx, cy)` (and subpath start `(sx, sy)`) past
+/// `cmd`, which may be absolute or relative.
+fn advance_point(cmd: &PathCmd, cx: &mut f64, cy: &mut f64, sx: &mut f64, sy: &mut f64) {
+    let a = &cmd.args;
+    match cmd.cmd {
+        'M' => {
+            *cx = a[0];
+            *cy = a[1];
+            *sx = *cx;
+            *sy = *cy;
+        }
+        'm' => {
+            *cx += a[0];
+            *cy += a[1];
+            *sx = *cx;
+            *sy = *cy;
+        }
+        'L' | 'T' => {
+            *cx = a[0];
+            *cy = a[1];
+        }
+        'l' | 't' => {
+            *cx += a[0];
+            *cy += a[1];
+        }
+        'H' => *cx = a[0],
+        'h' => *cx += a[0],
+        'V' => *cy = a[0],
+        'v' => *cy += a[0],
+        'C' => {
+            *cx = a[4];
+            *cy = a[5];
+        }
+        'c' => {
+            *cx += a[4];
+            *cy += a[5];
+        }
+        'S' | 'Q' => {
+            *cx = a[2];
+            *cy = a[3];
+        }
+        's' | 'q' => {
+            *cx += a[2];
+            *cy += a[3];
+        }
+        'A' => {
+            *cx = a[5];
+            *cy = a[6];
+        }
+        'a' => {
+            *cx += a[5];
+            *cy += a[6];
+        }
+        'Z' | 'z' => {
+            *cx = *sx;
+            *cy = *sy;
+        }
+        _ => {}
+    }
 }
 
 /// Merge a horizontal (or vertical) absolute `L` into the previous `L` when
@@ -2204,6 +2280,25 @@ mod tests {
         assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mhzmhz");
         // Later `m` subpaths stay relative; the serialized form is unchanged.
         assert_eq!(serialize_path(&cmds, 3), "M5 5h10zm20 0h5z");
+    }
+
+    #[test]
+    fn arc_radius_rounding_uses_relative_chord() {
+        // Absolute `A`: the chord is end - current point, not the raw end
+        // point. Rounding 50.4 -> 50 would change the sagitta by 0.06.
+        let out = optimize_path("M-50 0A50.4 50.4 0 0 1 .5 .5", 3).unwrap();
+        assert!(out.contains("50.4 50.4"), "{out}");
+        // SVGO convertPathData.15 at precision 2 keeps 6.44.
+        let out = optimize_path("M.05 6.45A6.44 6.44 0 0 1 6.48 .02", 2).unwrap();
+        assert!(out.contains("6.44 6.44"), "{out}");
+        // SVGO convertPathData.33: with the right (unit) chord the radius
+        // rounds all the way to 11 (SVGO: `M1 1a11 11 0 0 0 1 0`).
+        let out = optimize_path("m 1 1 a 10.567 10.567 0 0 0 1 0", 3).unwrap();
+        assert!(out.contains("11 11 0 0 0"), "{out}");
+        assert!(!out.contains("10.6"), "{out}");
+        // A relative `a` is unaffected.
+        let out = optimize_path("M100 100a100.4 100.4 0 0 1 1 .5", 3).unwrap();
+        assert!(out.contains("a100 100"), "{out}");
     }
 
     #[test]
