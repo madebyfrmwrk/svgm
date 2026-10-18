@@ -1030,3 +1030,54 @@ fn style_geometry() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+#[test]
+fn cleanup_ids_duplicate_id() {
+    // Issue #29: each id is declared once in the output; the orphaned second
+    // gradient is removed by removeUselessDefs once it has lost its id.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/cleanup_ids_duplicate_id.svg",
+    ));
+    assert_valid_svg(&output, "cleanup_ids_duplicate_id");
+    assert_eq!(output.matches("id=\"a\"").count(), 1, "{output}");
+    assert_eq!(output.matches("id=\"b\"").count(), 1, "{output}");
+    assert_eq!(output.matches("<linearGradient").count(), 1, "{output}");
+    assert!(
+        output.contains("<circle cx=\"50\" cy=\"50\" r=\"10\"/>"),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
+
+#[test]
+fn every_fixture_is_idempotent() {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "svg") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(Path::new("tests/fixtures"), &mut files);
+    assert!(
+        files.len() >= 30,
+        "fixture walk found only {} files",
+        files.len()
+    );
+    for path in files {
+        let input = fs::read_to_string(&path).unwrap();
+        let once = svgm_core::optimize(&input).unwrap();
+        let twice = svgm_core::optimize(&once.data).unwrap();
+        assert_eq!(
+            once.data,
+            twice.data,
+            "{}: second optimization differs",
+            path.display()
+        );
+    }
+}

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- #29: repeated id declarations; the first in document order wins -->
+  <defs>
+    <linearGradient id="grad"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
+    <linearGradient id="grad"><stop offset="0" stop-color="green"/><stop offset="1" stop-color="yellow"/></linearGradient>
+  </defs>
+  <rect width="100" height="100" fill="url(#grad)"/>
+  <rect id="shape" width="10" height="10"/>
+  <circle id="shape" cx="50" cy="50" r="10"/>
+  <use href="#shape" x="20"/>
+</svg>

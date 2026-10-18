@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Geometry set in `style=""` is no longer ignored** (#48). SVG 2 makes `x`, `y`, `width`, `height`, `rx`, `ry`, `cx`, `cy`, `r` and `d` CSS properties that override the attributes. `convertShapeToPath` turned `<rect width="10" style="width:30px">` into a 10-wide path, `convertEllipseToCircle` dropped `style="rx:…"`, `removeHiddenElems` deleted `<rect width="0" style="width:30px">` and `<circle r="0" style="r:15px">` as zero-size (also when inlineStyles had just moved a `.a{width:…}` rule into `style`), and `mergePaths` merged paths whose CSS `d` overrides their attribute. These passes now leave such elements alone, and removeHiddenElems skips its zero-size checks while a stylesheet declares geometry. SVGO 4.0.1 has the same bugs.
+- **Repeated `id` declarations are removed** (#29). When several elements declared the same id, `cleanupIds` renamed every one of them to the same short name, leaving invalid SVG and an orphaned `<defs>` child. Now the first declaration in document order keeps the id (the element browsers resolve `url(#…)`/`href` to, and SVGO's rule) and later ones lose it, so `removeUselessDefs` can drop orphaned definitions. Duplicates are kept when a stylesheet selects the id (`#x`, `[id…]`), since such a rule matches every carrier. (The other half of #29, id names rotating on a second run, was already fixed in 0.4.0; a new integration test now checks that every fixture is idempotent.)
 
 ### Changed
 

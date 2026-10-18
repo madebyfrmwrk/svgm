@@ -1,5 +1,6 @@
 use super::{
-    Pass, PassResult, has_scripts, inside_foreign_object, is_css_ident_char, unescape_css_ident,
+    Pass, PassResult, attributes_in_stylesheets, has_scripts, inside_foreign_object,
+    is_css_ident_char, unescape_css_ident,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +13,11 @@ use std::ops::Range;
 ///
 /// Names are assigned in first-reference order (as SVGO does), which keeps
 /// the output stable across `sortDefsChildren` and `sortAttrs`.
+///
+/// When several elements declare the same id, the first in document order
+/// wins (as in browsers and SVGO): later declarations lose the attribute,
+/// unless a stylesheet can select them by it (`#x`, `[id]`), since such a
+/// rule matches every carrier.
 ///
 /// Deoptimises (leaves the document alone) when, as in SVGO:
 /// - a script may run (`<script>`, `javascript:` links, event handlers):
@@ -53,17 +59,19 @@ impl Pass for CleanupIds {
             .filter(|&id| inside_foreign_object(doc, id))
             .collect();
 
-        // Phase 1: collect all id declarations.
+        // Phase 1: collect all id declarations, noting repeated ones (the
+        // first carrier in document order is the one references resolve to).
         let mut declared: HashSet<String> = HashSet::new();
         let mut foreign_ids: HashSet<String> = HashSet::new();
+        let mut repeated: Vec<(NodeId, String)> = Vec::new();
         for &id in &ids {
             if let NodeKind::Element(ref elem) = doc.node(id).kind
                 && let Some(id_val) = elem.attr("id")
             {
                 if foreign.contains(&id) {
                     foreign_ids.insert(id_val.to_string());
-                } else {
-                    declared.insert(id_val.to_string());
+                } else if !declared.insert(id_val.to_string()) {
+                    repeated.push((id, id_val.to_string()));
                 }
             }
         }
@@ -75,6 +83,7 @@ impl Pass for CleanupIds {
         let mut refs_in_order: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut style_text_nodes: HashSet<NodeId> = HashSet::new();
+        let mut css_refs: HashSet<String> = HashSet::new();
         {
             let mut note = |r: String| {
                 if !seen.contains(&r) {
@@ -126,6 +135,7 @@ impl Pass for CleanupIds {
                     {
                         style_text_nodes.insert(id);
                         for (_, r) in css_id_refs(text) {
+                            css_refs.insert(r.clone());
                             note(r);
                         }
                     }
@@ -152,7 +162,7 @@ impl Pass for CleanupIds {
         for &root in &skipped {
             collect_declared_ids(doc, root, &mut reserved);
         }
-        reserved.extend(foreign_ids);
+        reserved.extend(foreign_ids.iter().cloned());
 
         let mut generator = IdGenerator::new();
         let mut rename_map: HashMap<String, String> = HashMap::new();
@@ -163,8 +173,23 @@ impl Pass for CleanupIds {
             }
         }
 
+        // Repeated declarations to strip: not when a stylesheet selects the
+        // id (`#x` or an `[id]` attribute selector matches every carrier),
+        // and not when an HTML element in <foreignObject> also carries it.
+        let id_attr_selector =
+            !style_text_nodes.is_empty() && attributes_in_stylesheets(doc).contains("id");
+        let drop: HashSet<NodeId> = if id_attr_selector {
+            HashSet::new()
+        } else {
+            repeated
+                .into_iter()
+                .filter(|(_, v)| !css_refs.contains(v) && !foreign_ids.contains(v))
+                .map(|(id, _)| id)
+                .collect()
+        };
+
         // Phase 4: anything to do?
-        if declared.len() == referenced.len() && rename_map.is_empty() {
+        if declared.len() == referenced.len() && rename_map.is_empty() && drop.is_empty() {
             return PassResult::Unchanged;
         }
 
@@ -185,7 +210,7 @@ impl Pass for CleanupIds {
                             .position(|a| a.name == "id" && a.prefix.is_none())
                     {
                         let id_val = elem.attributes[id_attr_pos].value.clone();
-                        if !referenced.contains(id_val.as_str()) {
+                        if !referenced.contains(id_val.as_str()) || drop.contains(&id) {
                             elem.attributes.remove(id_attr_pos);
                             changed = true;
                         } else if let Some(new_name) = rename_map.get(&id_val) {
@@ -994,6 +1019,104 @@ mod tests {
         assert_eq!(
             output,
             "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs><linearGradient id=\"a\"><stop offset=\"5%\" stop-color=\"#F60\"/></linearGradient><text id=\"b\">referenced text</text><path id=\"d\" d=\"...\"/><path id=\"c\" d=\"...\"/><path id=\"e\" d=\"...\"/></defs><g><circle fill=\"url(#a)\" cx=\"60\" cy=\"60\" r=\"50\"/><rect fill=\"url('#a')\" x=\"0\" y=\"0\" width=\"500\" height=\"100\"/><tref xlink:href=\"#b\"/></g><g><tref xlink:href=\"#b\"/></g><animateMotion xlink:href=\"#d\" dur=\"0.5s\" begin=\"c.mouseover\" fill=\"freeze\" path=\"m 0,0 0,-21\"/><use xlink:href=\"#e\"/></svg>"
+        );
+    }
+
+    // --- repeated id declarations (#29) ---
+
+    #[test]
+    fn removes_later_duplicate_id_declaration() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"shape\" width=\"10\" height=\"10\"/><circle id=\"shape\" cx=\"50\" cy=\"50\" r=\"10\"/><use href=\"#shape\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"a\" width=\"10\" height=\"10\"/><circle cx=\"50\" cy=\"50\" r=\"10\"/><use href=\"#a\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn duplicate_in_defs_loses_id() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient><linearGradient id=\"g\"><stop offset=\"1\"/></linearGradient></defs><rect fill=\"url(#g)\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"a\"><stop offset=\"0\"/></linearGradient><linearGradient><stop offset=\"1\"/></linearGradient></defs><rect fill=\"url(#a)\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn only_first_of_three_duplicates_keeps_id() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"x\"/><g id=\"x\"/><g id=\"x\"/><use href=\"#x\"/></svg>";
+        let (_, output) = run_pass(input);
+        assert_eq!(output.matches("id=\"").count(), 1, "{output}");
+        assert!(
+            output.starts_with(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><g id=\"a\"></g><g></g><g></g>"
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn duplicate_removal_alone_reports_changed() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"a\"/><rect id=\"a\"/><use href=\"#a\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"a\"/><rect/><use href=\"#a\"/></svg>"
+        );
+    }
+
+    #[test]
+    fn duplicates_kept_when_stylesheet_selects_them() {
+        // `#shape` / `[id=shape]` match every carrier; renaming stays
+        // consistent across all of them.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#shape{fill:red}</style><rect id=\"shape\"/><circle id=\"shape\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#a{fill:red}</style><rect id=\"a\"/><circle id=\"a\"/></svg>"
+        );
+
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>[id=a]{fill:red}</style><rect id=\"a\"/><circle id=\"a\"/><use href=\"#a\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged, "{output}");
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn unrelated_stylesheet_does_not_protect_duplicates() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.c:hover{fill:red}</style><rect id=\"a\" class=\"c\"/><rect id=\"a\"/><use href=\"#a\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(
+            output.contains("<rect id=\"a\" class=\"c\"/><rect/>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn prefixed_xml_id_is_not_a_duplicate() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect xml:id=\"x\"/><rect xml:id=\"x\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output, input);
+    }
+
+    // SVGO cleanupIds.01 declares `<path id="two">` twice: the second loses
+    // its id (expected output `<path id="e" .../><path d="..."/>`).
+    #[test]
+    fn svgo_01_repeated_id() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs><path id=\"two\" d=\"...\"/><path id=\"two\" d=\"...\"/></defs><use xlink:href=\"#two\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(
+            output,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs><path id=\"a\" d=\"...\"/><path d=\"...\"/></defs><use xlink:href=\"#a\"/></svg>"
         );
     }
 
