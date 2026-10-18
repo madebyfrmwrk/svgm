@@ -35,7 +35,7 @@ pub(crate) const URL_REF_ATTRS: &[&str] = &[
 /// Elements that can safely receive a `transform` attribute.
 pub(crate) const MOVEABLE_ELEMENTS: &[&str] = &[
     "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "text", "use",
-    "image", "svg",
+    "image", "svg", "a", "switch",
 ];
 
 /// Inheritable presentation attributes (matches SVGO's `inheritableAttrs`
@@ -637,6 +637,84 @@ pub(crate) fn computed_style_with(
 /// and any non-ASCII code point (CSS Syntax Level 3).
 pub(crate) fn is_css_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii()
+}
+
+// ---------------------------------------------------------------------------
+// Group / transform safety
+// ---------------------------------------------------------------------------
+
+/// Properties whose semantics differ on a `<g>` and on a single element:
+/// clip-path/mask/filter on a group apply to the composited result of all
+/// children (in the group's own coordinate system), which is not the same
+/// as applying them to a child individually or after a transform.
+pub(crate) const GROUP_ONLY_ATTRS: &[&str] = &["clip-path", "mask", "filter"];
+
+/// True when the element carries any [`GROUP_ONLY_ATTRS`] property, either
+/// as a presentation attribute or as a `style` declaration (an empty
+/// declaration such as `style="filter:"` counts: SVGO's `computeStyle`
+/// treats the property as present, and "unknown" must mean "unsafe").
+pub(crate) fn has_group_only_prop(elem: &Element) -> bool {
+    GROUP_ONLY_ATTRS
+        .iter()
+        .any(|&p| elem.attr(p).is_some() || style_declaration(elem, p).is_some())
+}
+
+/// True when any [`URL_REF_ATTRS`] value or the `style` attribute contains
+/// a `url(` reference (SVGO's `referencesProps` + `includesUrlReference`).
+/// Moving such an element into a different coordinate space can change
+/// what the referenced gradient/clip/mask/marker/filter renders.
+pub(crate) fn has_url_reference(elem: &Element) -> bool {
+    elem.attributes.iter().any(|a| {
+        a.prefix.is_none()
+            && (a.name == "style" || URL_REF_ATTRS.contains(&a.name.as_str()))
+            && a.value.contains("url(")
+    })
+}
+
+/// True when the element is an unprefixed SMIL animation element.
+pub(crate) fn is_animation_element(elem: &Element) -> bool {
+    elem.prefix.is_none() && ANIMATION_ELEMS.contains(&elem.name.as_str())
+}
+
+/// True when any direct child of `id` is an animation element. Animation
+/// children "add" attributes to their parent, so such a parent cannot be
+/// unwrapped or have its attributes moved (SVGO `collapseGroups`).
+pub(crate) fn has_animation_child(doc: &Document, id: NodeId) -> bool {
+    doc.children(id)
+        .any(|c| elem(doc, c).is_some_and(is_animation_element))
+}
+
+/// All descendants of `id` (depth-first, excluding `id` itself), skipping
+/// removed nodes.
+pub(crate) fn descendants(doc: &Document, id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeId> = doc.children(id).collect();
+    stack.reverse();
+    while let Some(n) = stack.pop() {
+        out.push(n);
+        let mut kids: Vec<NodeId> = doc.children(n).collect();
+        kids.reverse();
+        stack.extend(kids);
+    }
+    out
+}
+
+/// SVGO's recursive `hasAnimatedAttr`: true when `id` itself or any
+/// descendant is an animation element whose `attributeName` is `attr_name`.
+/// [`has_animated_attr`] only looks at direct children.
+pub(crate) fn has_animated_attr_deep(doc: &Document, id: NodeId, attr_name: &str) -> bool {
+    std::iter::once(id).chain(descendants(doc, id)).any(|n| {
+        elem(doc, n)
+            .is_some_and(|e| is_animation_element(e) && e.attr("attributeName") == Some(attr_name))
+    })
+}
+
+/// True when the concatenated `<style>` text contains `needle`. A cheap,
+/// conservative stand-in for "does any CSS rule set this property": the
+/// caller must still check that the element can match a selector (has a
+/// `class` or `id`).
+pub(crate) fn stylesheet_contains(doc: &Document, needle: &str) -> bool {
+    stylesheet_text(doc).contains(needle)
 }
 
 #[cfg(test)]
