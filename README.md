@@ -108,18 +108,18 @@ SVGM auto-discovers the config by walking up from the input file's directory. Us
 
 ## Benchmarks
 
-100 real-world SVG logos (Figma, Illustrator, Inkscape, svgrepo exports). 902.8 KiB total original size. svgm 0.4.0 vs SVGO 4.0.1, same files, same machine.
+100 real-world SVG logos (Figma, Illustrator, Inkscape, svgrepo exports). 902.8 KiB total original size. svgm (main, after 0.4.0) vs SVGO 4.0.1, same files, same machine.
 
 | | **SVGM** | **SVGO** |
 |:--|:--|:--|
 | **Compression** | 18.1% | **18.2%** |
-| **Time, one process per file** | **0.48s** | 11.2s |
-| **Time, one process for the folder** | **115ms** | 278ms |
-| **Speed** | **24x faster** per file, 2.4x in batch mode | baseline |
-| **Files won** | 36 | **62** |
+| **Time, one process per file** | **0.63s** | 12.1s |
+| **Time, one process for the folder** | **120ms** | 293ms |
+| **Speed** | **19x faster** per file, 2.4x in batch mode | baseline |
+| **Files won** | 32 | **66** |
 | **Invocations to converge** | **1** | 1-3 |
 
-0.4.0 trades about 0.4 points of compression (0.3.9: 18.5%) for SVGO-equivalent safety: every optimisation SVGO refuses as unsafe is now refused by svgm too, and a 414-file pixel comparison shows no rendering difference between svgm's output and SVGO's. Almost all of the difference is inside path data: 0.3.9 rounded many coordinates past the configured precision (its `strongRound` compared two rounded values), which 0.4.0 fixes to SVGO's rule; the rest is an absolute/relative segment choice that now sometimes picks the longer form and is tracked for the next release. Full details in [benchmark-results.md](benchmark-results.md).
+0.4.0 traded about 0.4 points of compression (0.3.9: 18.5%) for SVGO-equivalent safety: every optimisation SVGO refuses as unsafe is now refused by svgm too, and a 414-file pixel comparison shows no rendering difference between svgm's output and SVGO's. Almost all of the difference is inside path data: 0.3.9 rounded many coordinates past the configured precision (its `strongRound` compared two rounded values), which 0.4.0 fixes to SVGO's rule; the rest is an absolute/relative segment choice that now sometimes picks the longer form and is tracked for the next release. Since 0.4.0, svgm also keeps `data-*` attributes (Illustrator's `data-name`) as SVGO does, which costs 184 bytes on 8 files. Reproduce with `scripts/benchmark.py`; full details in [benchmark-results.md](benchmark-results.md).
 
 ## How it works
 
