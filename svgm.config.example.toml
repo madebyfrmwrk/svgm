@@ -6,5 +6,7 @@
 # precision = 3          # decimal digits (default: 3)
 
 [passes]
-# removeDesc = true       # opt-in: strip <desc> and <title>
+# removeDesc = false      # opt-out (on in the default preset, off in safe): strips empty <desc>
+#                         # and editor boilerplate ("Created with ...", "Created using ...");
+#                         # custom descriptions and <title> are always kept
 # collapseGroups = false   # opt-out: keep <g> wrappers as-is

@@ -6,14 +6,11 @@ use crate::ast::{Document, NodeKind};
 /// Custom descriptions are preserved for accessibility.
 pub struct RemoveDesc;
 
-/// Patterns that indicate an editor-generated description.
-const EDITOR_PATTERNS: &[&str] = &[
-    "Created with",
-    "Created using",
-    "Generator:",
-    "Made with",
-    "Produced by",
-];
+/// Patterns that indicate an editor-generated description. Matches SVGO's
+/// `standardDescs` (`/^(Created with|Created using)/`); anything broader
+/// ("Generator:", "Made with", "Produced by") can also start a human-written
+/// accessible description and is therefore kept.
+const EDITOR_PATTERNS: &[&str] = &["Created with", "Created using"];
 
 impl Pass for RemoveDesc {
     fn name(&self) -> &'static str {
@@ -128,9 +125,35 @@ mod tests {
     }
 
     #[test]
-    fn removes_generator_pattern() {
+    fn keeps_generator_pattern() {
+        // SVGO's standardDescs only matches "Created with"/"Created using";
+        // "Generator: ..." may be a human-authored description.
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>Generator: Adobe Illustrator 24.0</desc><rect/></svg>"#;
         let mut doc = parse(input).unwrap();
-        assert_eq!(RemoveDesc.run(&mut doc), PassResult::Changed);
+        assert_eq!(RemoveDesc.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains("Generator: Adobe Illustrator 24.0"));
+    }
+
+    #[test]
+    fn keeps_made_with_pattern() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>Made with love by the design team</desc><rect/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveDesc.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains("<desc>Made with love by the design team</desc>"));
+    }
+
+    #[test]
+    fn keeps_produced_by_pattern() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>Produced by the 2024 census; bars show population per region</desc><rect/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveDesc.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains("Produced by the 2024 census"));
+    }
+
+    #[test]
+    fn pattern_must_be_at_start() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>Logo. Created with care.</desc><rect/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveDesc.run(&mut doc), PassResult::Unchanged);
     }
 }
