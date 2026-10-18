@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A leftover `<style>` that selects only by class or id no longer blocks structural passes** (#47). Since 0.4.0, any stylesheet that inlineStyles could not fully inline (`@media print{.st0{…}}`, `.st0:hover`, `#x:target`, `@keyframes`-only sheets) switched off `collapseGroups`, `convertShapeToPath`, `convertEllipseToCircle` and `moveGroupAttrsToElems`. svgm now classifies every selector. Only type selectors, a bare `*`, combinators, attribute selectors, tree/functional pseudo-classes, pseudo-elements, CSS nesting and `@import` keep the passes off. Class/id-only sheets get extra guards instead, because their rules can still declare properties that depend on the element: shapes are not converted while a rule sets geometry (`width`, `r`, `rx`, …), `d` or markers; a group is not merged into its child while either carries a `class`/`id`; and a group transform is not moved while a rule sets `transform`, `transform-origin`, `transform-box` or a `url()`. (SVGO converts `<rect class="a">` to a path even under `.a{width:20px}`, which changes the rendering; svgm does not.) 21 of 521 sweep inputs (SVGO fixtures, svgm fixtures, the 100-logo corpus) get 5–51 bytes smaller, all pixel-identical to 0.4.0; the 100-logo benchmark is unchanged.
+- New `scripts/sweep.py` and `scripts/gen_malformed.py`: the regression sweeps used for releases (SVGO fixtures + real files and a 443-input malformed corpus, compared against a baseline binary, with idempotence, crash and optional rsvg-convert pixel checks).
+
 ## 0.4.0
 
 A correctness release. Every optimisation that SVGO 4 refuses as unsafe is now refused by svgm too, after an audit of all 34 default passes against SVGO's source and fixtures. On the 100-logo benchmark corpus compression goes from 18.5% (0.3.9) to 18.1% (SVGO 4.0.1: 18.2%). Nearly all of that is path data: 0.3.9 rounded many coordinates past the configured precision, which the corrected strongRound rule no longer does. In exchange, none of the cases below change how an SVG renders any more, and a 414-file pixel comparison of svgm output against SVGO output shows no difference. 0 hangs, 0 panics and 0 non-idempotent files on the 433-input robustness corpus. Test count 356 → 670.
