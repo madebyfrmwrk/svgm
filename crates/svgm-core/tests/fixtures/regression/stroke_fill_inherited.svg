@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <g style="stroke:#000"><path d="M3 3h5" stroke-width="4" stroke-dasharray="2 1"/></g>
+  <circle cx="12" cy="12" r="10"/>
+  <line x1="12" y1="16" x2="12" y2="12"/>
+  <defs><g id="icon"><path d="M0 0h5" stroke-width="4"/></g></defs>
+  <use href="#icon" stroke="red"/>
+  <path d="M1 1h2" stroke="none" style="stroke:red" stroke-width="3"/>
+  <path d="M1 1h2" fill="none" style="fill:red" fill-rule="evenodd"/>
+  <marker id="m"><path d="M0 0h1"/></marker>
+  <line x1="0" y1="0" x2="5" y2="0" stroke="none" stroke-width="5" marker-end="url(#m)"/>
+  <g stroke="none"><path d="M7 7h2" stroke-width="9" stroke-dasharray="3"/></g>
+</svg>

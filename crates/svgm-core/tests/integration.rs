@@ -459,3 +459,40 @@ fn regression_hidden_elems_css() {
         assert!(output.contains("x2=\"100%\""), "{preset}: {output}");
     }
 }
+
+#[test]
+fn regression_stroke_fill_inherited() {
+    let (default, safe) = optimize_fixture_both_presets("stroke_fill_inherited.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // Stroke comes from the root <svg> / a group style="": the stroke
+        // sub-properties on the shapes are not useless.
+        assert!(
+            output.contains("stroke-dasharray=\"2 1\""),
+            "{preset}: {output}"
+        );
+        assert_eq!(
+            output.matches("stroke-width=\"4\"").count(),
+            2,
+            "{preset}: group-styled path and <use> target keep stroke-width: {output}"
+        );
+        // Own style="" beats the presentation attribute.
+        assert!(
+            output.contains("stroke:red") && output.contains("stroke-width=\"3\""),
+            "{preset}: {output}"
+        );
+        assert!(
+            output.contains("fill:red") && output.contains("fill-rule=\"evenodd\""),
+            "{preset}: {output}"
+        );
+        // marker-end scales with stroke-width even when the stroke is none.
+        assert!(output.contains("stroke-width=\"5\""), "{preset}: {output}");
+        // The Feather-style icon keeps its inherited round caps.
+        assert!(
+            output.contains("stroke-linecap=\"round\""),
+            "{preset}: {output}"
+        );
+    }
+    // Under <g stroke="none"> the sub-properties really are useless.
+    assert!(!default.contains("stroke-width=\"9\""), "{default}");
+    assert!(!default.contains("stroke-dasharray=\"3\""), "{default}");
+}
