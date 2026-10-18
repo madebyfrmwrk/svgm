@@ -364,3 +364,72 @@ fn illustrator_entities() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+/// Every prefix used by an element or attribute in `output` must be declared
+/// on that element or one of its ancestors (otherwise the XML is ill-formed).
+fn assert_prefixes_declared(output: &str) {
+    use svgm_core::ast::{Document, NodeId, NodeKind};
+    fn walk(doc: &Document, id: NodeId, in_scope: &[String]) {
+        let mut scope = in_scope.to_vec();
+        if let NodeKind::Element(ref elem) = doc.node(id).kind {
+            scope.extend(elem.namespaces.iter().map(|ns| ns.prefix.clone()));
+            let used = elem
+                .prefix
+                .iter()
+                .chain(elem.attributes.iter().filter_map(|a| a.prefix.as_ref()));
+            for prefix in used {
+                assert!(
+                    prefix == "xml" || scope.contains(prefix),
+                    "prefix {prefix}: used on <{}> but not declared",
+                    elem.qualified_name()
+                );
+            }
+        }
+        for child in doc.children(id) {
+            walk(doc, child, &scope);
+        }
+    }
+    let doc = svgm_core::parser::parse(output).unwrap();
+    walk(&doc, doc.root, &[]);
+}
+
+#[test]
+fn editor_namespaces_by_uri() {
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/editor_namespaces_by_uri.svg",
+    ));
+    assert_valid_svg(&output, "editor_namespaces_by_uri");
+    assert_prefixes_declared(&output);
+    // Editor data under non-canonical prefixes is gone, declarations too.
+    for gone in [
+        "ink:",
+        "sp:",
+        "serif:",
+        "bx:",
+        "v:",
+        "xmlns:ink",
+        "xmlns:sp",
+        "xmlns:serif",
+        "xmlns:bx",
+        "xmlns:v",
+        "namedview",
+        "documentProperties",
+        "grid",
+    ] {
+        assert!(!output.contains(gone), "{gone} should be removed: {output}");
+    }
+    // `x` bound to XLink and `a` bound to a custom namespace are not editor
+    // data, whatever Illustrator conventionally binds those prefixes to.
+    assert!(
+        output.contains("xmlns:x=\"http://www.w3.org/1999/xlink\""),
+        "{output}"
+    );
+    assert_eq!(output.matches("x:href=\"#").count(), 2, "{output}");
+    assert!(output.contains("a:role=\"keep\""), "{output}");
+    assert!(
+        output.contains("xmlns:a=\"http://example.com/custom\""),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
