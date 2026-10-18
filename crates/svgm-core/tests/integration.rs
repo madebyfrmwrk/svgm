@@ -414,3 +414,48 @@ fn regression_defaults_ancestor_style() {
         );
     }
 }
+
+#[test]
+fn regression_hidden_elems_css() {
+    let (default, safe) = optimize_fixture_both_presets("hidden_elems_css.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // display="none" may be overridden by the stylesheet (.show, :hover)
+        // or by style="display:inline": all three rects render.
+        assert!(
+            output.contains("display=\"block\"") || output.contains("class=\"show\""),
+            "{preset}: {output}"
+        );
+        assert!(output.contains("class=\"hov\""), "{preset}: {output}");
+        assert!(output.contains(".hov:hover"), "{preset}: {output}");
+        assert!(output.contains("display:inline"), "{preset}: {output}");
+        // Nothing with display="none" was deleted.
+        assert_eq!(
+            output.matches("display=\"none\"").count()
+                + output.matches("display=\"block\"").count(),
+            3,
+            "{preset}: {output}"
+        );
+        // A marker with display:none is still rendered where referenced.
+        assert!(output.contains("<marker"), "{preset}: {output}");
+        // SVG2 auto radius: <ellipse ry="2"> renders as a circle.
+        assert!(
+            output.contains("<ellipse") || output.contains("<circle"),
+            "{preset}: {output}"
+        );
+        // Zero-length line with round caps renders a dot.
+        assert!(
+            output.contains("stroke-linecap=\"round\""),
+            "{preset}: {output}"
+        );
+        // fill=none + stroke=none is not a removal rule (hit area).
+        assert!(
+            output.contains("pointer-events=\"all\""),
+            "{preset}: {output}"
+        );
+        // Percent / unit coordinates are not numbers: the rect stays a rect
+        // at x=25%, and the 100%-long line stays a line.
+        assert!(output.contains("x=\"25%\""), "{preset}: {output}");
+        assert!(output.contains("height=\"1em\""), "{preset}: {output}");
+        assert!(output.contains("x2=\"100%\""), "{preset}: {output}");
+    }
+}
