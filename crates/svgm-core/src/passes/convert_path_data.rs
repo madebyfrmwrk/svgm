@@ -112,11 +112,13 @@ fn optimize_path_with(d: &str, precision: u32, has_markers: bool) -> Option<Stri
     let commands = detect_shorthands(commands, precision);
     let commands = remove_redundant(commands, precision, has_markers);
 
-    // Phase 3: Pick shorter abs/rel per command
-    let commands = abs_to_rel(commands, precision);
+    // Phase 3: Merge runs of same-direction horizontal/vertical lines
+    // (h+h→h, v+v→v) while still absolute, so the abs/rel choice below sees
+    // the merged segment (SVGO collapses before picking the shorter form).
+    let commands = merge_collinear_lines(commands);
 
-    // Phase 4: Merge consecutive same-direction lines (h+h→h, v+v→v)
-    let commands = merge_consecutive(commands, precision);
+    // Phase 4: Pick shorter abs/rel per command
+    let commands = abs_to_rel(commands, precision);
 
     // Phase 5: Simplify arc radii (round equal rx/ry to lower precision when safe)
     let commands = simplify_arc_radii(commands, precision);
@@ -1440,47 +1442,65 @@ fn simplify_arc_radii(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
         .collect()
 }
 
-fn merge_consecutive(commands: Vec<PathCmd>, precision: u32) -> Vec<PathCmd> {
-    if commands.is_empty() {
-        return commands;
-    }
-
+/// Merge a horizontal (or vertical) absolute `L` into the previous `L` when
+/// both lie on the same axis line and point the same way — the `h+h→h` /
+/// `v+v→v` collapse of SVGO's collapseRepeated. Opposite directions are
+/// kept: `h30h-30` is a visible stroked line drawn there and back, not
+/// nothing. Other commands are never merged (consecutive `l` segments go
+/// to distinct waypoints).
+fn merge_collinear_lines(commands: Vec<PathCmd>) -> Vec<PathCmd> {
     let mut result: Vec<PathCmd> = Vec::with_capacity(commands.len());
+    let (mut cx, mut cy) = (0.0f64, 0.0f64); // current point
+    let (mut sx, mut sy) = (0.0f64, 0.0f64); // subpath start
+    // Start point of the last pushed command when it is an `L`.
+    let mut line_from: Option<(f64, f64)> = None;
 
     for cmd in commands {
-        if let Some(prev) = result.last_mut() {
-            // Merge consecutive h commands
-            if cmd.cmd == 'h' && prev.cmd == 'h' {
-                prev.args[0] += cmd.args[0];
-                continue;
+        match cmd.cmd {
+            'L' => {
+                let (x, y) = (cmd.args[0], cmd.args[1]);
+                if let Some((fx, fy)) = line_from {
+                    let same_sign = |a: f64, b: f64| (a >= 0.0) == (b >= 0.0);
+                    let horizontal = fy == cy && cy == y && same_sign(cx - fx, x - cx);
+                    let vertical = fx == cx && cx == x && same_sign(cy - fy, y - cy);
+                    if (horizontal || vertical)
+                        && let Some(prev) = result.last_mut()
+                    {
+                        prev.args = vec![x, y];
+                        cx = x;
+                        cy = y;
+                        continue;
+                    }
+                }
+                line_from = Some((cx, cy));
+                cx = x;
+                cy = y;
+                result.push(cmd);
             }
-            if cmd.cmd == 'H' && prev.cmd == 'H' {
-                // Absolute H: just keep the last one (it overwrites)
-                prev.args[0] = cmd.args[0];
-                continue;
+            'M' => {
+                cx = cmd.args[0];
+                cy = cmd.args[1];
+                sx = cx;
+                sy = cy;
+                line_from = None;
+                result.push(cmd);
             }
-            // Merge consecutive v commands
-            if cmd.cmd == 'v' && prev.cmd == 'v' {
-                prev.args[0] += cmd.args[0];
-                continue;
+            'Z' | 'z' => {
+                cx = sx;
+                cy = sy;
+                line_from = None;
+                result.push(cmd);
             }
-            if cmd.cmd == 'V' && prev.cmd == 'V' {
-                prev.args[0] = cmd.args[0];
-                continue;
+            _ => {
+                if cmd.args.len() >= 2 {
+                    cx = cmd.args[cmd.args.len() - 2];
+                    cy = cmd.args[cmd.args.len() - 1];
+                }
+                line_from = None;
+                result.push(cmd);
             }
-            // Note: do NOT merge consecutive l commands — they represent distinct
-            // line segments to different waypoints. Merging skips waypoints.
         }
-        result.push(cmd);
     }
-
-    // Remove zero-length h/v that may result from merging
-    result.retain(|cmd| {
-        if (cmd.cmd == 'h' || cmd.cmd == 'v') && approx_eq(cmd.args[0], 0.0, precision) {
-            return false;
-        }
-        true
-    });
 
     result
 }
@@ -2172,6 +2192,30 @@ mod tests {
         assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mhzmhz");
         // Later `m` subpaths stay relative; the serialized form is unchanged.
         assert_eq!(serialize_path(&cmds, 3), "M5 5h10zm20 0h5z");
+    }
+
+    #[test]
+    fn opposite_direction_lines_are_not_merged_away() {
+        // SVGO convertPathData.12: h/h and v/v collapse only when
+        // they point the same way; a stroked back-and-forth line must stay.
+        // (SVGO additionally rewrites a line back to the start as `z`.)
+        for (input, expected) in [
+            ("M10 50h30h-30", "M10 50h30H10"),
+            ("M10 50h-30h30", "M10 50h-30 30"),
+            ("M10 50h-30h-50", "M10 50h-80"),
+            ("M10 50h30h50", "M10 50h80"),
+            ("M10 50v30v-30", "M10 50v30V50"),
+            ("M10 50v-30v30", "M10 50V20v30"),
+            ("M10 50v-30v-50", "M10 50v-80"),
+            ("M10 50v30v50", "M10 50v80"),
+            ("M10 50L10 80L10 0", "M10 50v30V0"),
+            ("M10 50L10 10L10 80", "M10 50V10v70"),
+            ("M10 50L80 50L0 50", "M10 50h70H0"),
+            ("M10 50L0 50L80 50", "M10 50H0h80"),
+        ] {
+            let out = optimize_path(input, 3).unwrap_or_else(|| input.to_string());
+            assert_eq!(out, expected, "{input}");
+        }
     }
 
     #[test]
