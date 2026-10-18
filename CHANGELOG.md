@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Geometry set in `style=""` is no longer ignored** (#48). SVG 2 makes `x`, `y`, `width`, `height`, `rx`, `ry`, `cx`, `cy`, `r` and `d` CSS properties that override the attributes. `convertShapeToPath` turned `<rect width="10" style="width:30px">` into a 10-wide path, `convertEllipseToCircle` dropped `style="rx:…"`, `removeHiddenElems` deleted `<rect width="0" style="width:30px">` and `<circle r="0" style="r:15px">` as zero-size (also when inlineStyles had just moved a `.a{width:…}` rule into `style`), and `mergePaths` merged paths whose CSS `d` overrides their attribute. These passes now leave such elements alone, and removeHiddenElems skips its zero-size checks while a stylesheet declares geometry. SVGO 4.0.1 has the same bugs.
+
 ### Changed
 
 - **A leftover `<style>` that selects only by class or id no longer blocks structural passes** (#47). Since 0.4.0, any stylesheet that inlineStyles could not fully inline (`@media print{.st0{…}}`, `.st0:hover`, `#x:target`, `@keyframes`-only sheets) switched off `collapseGroups`, `convertShapeToPath`, `convertEllipseToCircle` and `moveGroupAttrsToElems`. svgm now classifies every selector. Only type selectors, a bare `*`, combinators, attribute selectors, tree/functional pseudo-classes, pseudo-elements, CSS nesting and `@import` keep the passes off. Class/id-only sheets get extra guards instead, because their rules can still declare properties that depend on the element: shapes are not converted while a rule sets geometry (`width`, `r`, `rx`, …), `d` or markers; a group is not merged into its child while either carries a `class`/`id`; and a group transform is not moved while a rule sets `transform`, `transform-origin`, `transform-box` or a `url()`. (SVGO converts `<rect class="a">` to a path even under `.a{width:20px}`, which changes the rendering; svgm does not.) 21 of 521 sweep inputs (SVGO fixtures, svgm fixtures, the 100-logo corpus) get 5–51 bytes smaller, all pixel-identical to 0.4.0; the 100-logo benchmark is unchanged.

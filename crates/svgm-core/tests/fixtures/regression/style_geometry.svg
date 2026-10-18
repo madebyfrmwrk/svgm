@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
+  <!-- #48: SVG 2 geometry properties in style="" override the attributes -->
+  <rect width="10" height="10" style="width:30px"/>
+  <circle r="5" cx="20" cy="20" style="r:15px"/>
+  <ellipse rx="5" ry="5" cx="5" cy="30" style="rx:10px"/>
+  <rect y="50" width="0" height="10" style="width:30px"/>
+  <circle r="0" cx="60" cy="60" style="r:5px"/>
+  <path d="M0 70h5" stroke="#000" style="d:path('M40 70h5')"/>
+  <path d="M10 70h5" stroke="#000" style="d:path('M40 70h5')"/>
+</svg>

@@ -1,6 +1,7 @@
 use super::{
-    Computed, Pass, PassResult, animation_targets, computed_style_with, has_ancestor, has_scripts,
-    has_stylesheet, parse_svg_number,
+    CSS_GEOMETRY_PROPS, Computed, Pass, PassResult, animation_targets, computed_style_with,
+    has_ancestor, has_scripts, has_stylesheet, parse_svg_number, style_sets_any,
+    stylesheet_declares,
 };
 use crate::ast::{Document, Element, NodeId, NodeKind};
 
@@ -34,6 +35,10 @@ impl Pass for RemoveHiddenElems {
         // either exists. inlineStyles runs before this pass and removes
         // the sheet in the common case.
         let dynamic = has_stylesheet(doc) || has_scripts(doc);
+        // A rule that sets geometry (`.a{width:30px}`) overrides a zero or
+        // missing attribute; without selector matching, any such rule makes
+        // every element's size unknown.
+        let sheet_geometry = has_stylesheet(doc) && stylesheet_declares(doc, CSS_GEOMETRY_PROPS);
 
         // Phase 2: Check and remove hidden elements.
         let mut changed = false;
@@ -74,7 +79,7 @@ impl Pass for RemoveHiddenElems {
                 continue;
             }
 
-            if should_remove(doc, nid, elem, name, dynamic) {
+            if should_remove(doc, nid, elem, name, dynamic, sheet_geometry) {
                 doc.remove(nid);
                 changed = true;
             }
@@ -89,7 +94,14 @@ impl Pass for RemoveHiddenElems {
 }
 
 /// Determine if an element should be removed based on its properties.
-fn should_remove(doc: &Document, nid: NodeId, elem: &Element, name: &str, dynamic: bool) -> bool {
+fn should_remove(
+    doc: &Document,
+    nid: NodeId,
+    elem: &Element,
+    name: &str,
+    dynamic: bool,
+    sheet_geometry: bool,
+) -> bool {
     // display="none" / style="display:none" — universally invisible. The
     // computed value accounts for a `style=""` override (`display="none"
     // style="display:inline"` renders) and is unknown under a stylesheet.
@@ -99,6 +111,12 @@ fn should_remove(doc: &Document, nid: NodeId, elem: &Element, name: &str, dynami
             Computed::Static(v) if v.trim() == "none")
     {
         return true;
+    }
+
+    // Geometry set in CSS (`style="width:30px"`, `r:15px`, `d:path(...)`)
+    // overrides a zero or missing attribute: the size is unknown.
+    if sheet_geometry || style_sets_any(elem, CSS_GEOMETRY_PROPS) {
+        return false;
     }
 
     // Zero-size geometry checks. Only an explicitly numeric zero counts:
@@ -171,6 +189,42 @@ mod tests {
         let mut doc = parse(input).unwrap();
         let result = RemoveHiddenElems.run(&mut doc);
         (result, serialize(&doc))
+    }
+
+    // --- geometry set in CSS (#48) ---
+
+    #[test]
+    fn css_geometry_in_style_keeps_zero_or_missing_attrs() {
+        for shape in [
+            "<rect width=\"0\" height=\"10\" style=\"width:30px\"/>",
+            "<circle r=\"0\" style=\"r:15px\"/>",
+            "<circle style=\"r:15px\"/>",
+            "<ellipse rx=\"0\" ry=\"5\" style=\"rx:3px\"/>",
+            "<image width=\"0\" height=\"1\" style=\"width:5px\"/>",
+            "<path style=\"d:path('M0 0h5')\"/>",
+        ] {
+            let input = format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{shape}</svg>");
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{shape}");
+            assert_eq!(output, input);
+        }
+    }
+
+    #[test]
+    fn non_geometry_style_still_allows_zero_size_removal() {
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"0\" height=\"10\" style=\"fill:red\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed);
+        assert!(!output.contains("<rect"), "{output}");
+    }
+
+    #[test]
+    fn stylesheet_geometry_keeps_zero_size_elements() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{width:30px}.a:hover{fill:red}</style><rect class=\"a\" width=\"0\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged);
+        assert_eq!(output, input);
     }
 
     // --- display="none" ---

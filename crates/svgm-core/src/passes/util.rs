@@ -582,11 +582,17 @@ fn selector_is_class_id_only(selector: &str) -> bool {
     has_class_or_id
 }
 
-/// CSS properties whose effect depends on the element they land on: SVG 2
-/// geometry properties override the attributes a shape conversion reads
-/// (`.a{width:20px}` resizes a `<rect>` but not a `<path>`), `d` starts
-/// applying once an element becomes a `<path>`, and markers draw on paths
-/// but not on `<rect>`/`<circle>`/`<ellipse>`.
+/// SVG 2 geometry properties. Set in CSS (a `style=""` declaration or a
+/// stylesheet rule) they override the presentation attribute of the same
+/// name, so a pass that reads only the attribute sees the wrong geometry.
+pub(crate) const CSS_GEOMETRY_PROPS: &[&str] = &[
+    "x", "y", "width", "height", "rx", "ry", "cx", "cy", "r", "d",
+];
+
+/// CSS properties whose effect depends on the element they land on: the
+/// [`CSS_GEOMETRY_PROPS`] (`.a{width:20px}` resizes a `<rect>` but not a
+/// `<path>`; `d` starts applying once an element becomes a `<path>`) plus
+/// markers, which draw on paths but not on `<rect>`/`<circle>`/`<ellipse>`.
 pub(crate) const SHAPE_SENSITIVE_PROPS: &[&str] = &[
     "x",
     "y",
@@ -603,6 +609,11 @@ pub(crate) const SHAPE_SENSITIVE_PROPS: &[&str] = &[
     "marker-mid",
     "marker-end",
 ];
+
+/// True when the element's own `style=""` declares any of `props`.
+pub(crate) fn style_sets_any(elem: &Element, props: &[&str]) -> bool {
+    props.iter().any(|p| style_declaration(elem, p).is_some())
+}
 
 /// True when any declaration in any `<style>` (at any depth, including
 /// `@keyframes` bodies) sets one of `props` (ASCII case-insensitive).
@@ -1306,6 +1317,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(classify_stylesheets(&fo), StructuralCss::Structural);
+    }
+
+    #[test]
+    fn shape_sensitive_props_include_geometry() {
+        for p in CSS_GEOMETRY_PROPS {
+            assert!(SHAPE_SENSITIVE_PROPS.contains(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn style_sets_any_is_case_insensitive() {
+        let doc = parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:red;WIDTH:3px"/></svg>"#,
+        )
+        .unwrap();
+        let NodeKind::Element(ref e) = doc.node(find(&doc, "rect")).kind else {
+            unreachable!()
+        };
+        assert!(style_sets_any(e, CSS_GEOMETRY_PROPS));
+        assert!(!style_sets_any(e, &["r"]));
     }
 
     #[test]

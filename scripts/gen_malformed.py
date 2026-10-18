@@ -308,6 +308,13 @@ add("css_08_unicode_selectors", wrap('<style>.é:hover{fill:red}#ü:target{fill:
 add("css_09_lone_colons", wrap('<style>.a:{fill:red}.b::{fill:red}:{}</style><g><rect class="a b" width="1" height="1"/></g>'))
 add("css_10_deep_media", wrap('<style>' + '@media all{' * 500 + '.a{fill:red}' + '}' * 500 + '</style><g><rect class="a" width="1" height="1"/></g>'))
 
+# --- geometry in style="" (#48) and duplicate ids (#29) ---
+add("geom_01_style_inf", wrap('<rect width="0" height="1" style="width:1e999px"/><circle r="0" style="r:nan"/><ellipse rx="1" ry="1" style="rx:;ry:"/>'))
+add("geom_02_style_garbage", wrap('<rect width="10" height="10" style="width:calc(100% - &quot;x&quot;);height"/><path style="d:path(&quot;M0 0 garbage&quot;)"/><path style="d:"/>'))
+add("dupid_01_triple", wrap('<defs><linearGradient id="g"/><linearGradient id="g"/><linearGradient id="g"/></defs><rect fill="url(#g)" width="1" height="1"/><use href="#g"/>'))
+add("dupid_02_nested_and_css", wrap('<style>#x{fill:red}[id]{stroke:blue}</style><g id="x"><g id="x"><rect id="x" width="1" height="1"/></g></g><use href="#x"/>'))
+add("dupid_03_unicode_empty", wrap('<rect id="ü" width="1" height="1"/><rect id="ü" width="1" height="1"/><rect id="" width="1" height="1"/><rect id="" width="1" height="1"/><use href="#%C3%BC"/>'))
+
 for name, content in cases.items():
     with open(os.path.join(OUT, name + ".svg"), "w", encoding="utf-8", errors="surrogatepass") as f:
         f.write(content)

@@ -1012,3 +1012,21 @@ fn css_class_only_at_rule() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+#[test]
+fn style_geometry() {
+    // Issue #48: geometry in style="" must not be ignored by
+    // convertShapeToPath, convertEllipseToCircle, removeHiddenElems or
+    // mergePaths.
+    let (output, _, _) = optimize_file(Path::new("tests/fixtures/regression/style_geometry.svg"));
+    assert_valid_svg(&output, "style_geometry");
+    assert_eq!(output.matches("<rect").count(), 2, "{output}");
+    assert_eq!(output.matches("<circle").count(), 2, "{output}");
+    assert_eq!(output.matches("<ellipse").count(), 1, "{output}");
+    assert_eq!(output.matches("<path").count(), 2, "{output}");
+    for decl in ["width:30px", "r:15px", "rx:10px", "r:5px"] {
+        assert!(output.contains(decl), "{decl} missing from {output}");
+    }
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}

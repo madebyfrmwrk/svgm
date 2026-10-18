@@ -1,4 +1,7 @@
-use super::{Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css, stylesheet_declares};
+use super::{
+    CSS_GEOMETRY_PROPS, Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css,
+    style_sets_any, stylesheet_declares,
+};
 use crate::ast::{Attribute, Document, NodeKind};
 
 /// Converts `<ellipse>` to `<circle>` when `rx` equals `ry`, or when one
@@ -29,6 +32,12 @@ impl Pass for ConvertEllipseToCircle {
                 NodeKind::Element(e) if e.name == "ellipse" && e.prefix.is_none() => e,
                 _ => continue,
             };
+
+            // `style="rx:10px"` overrides the attribute and does not apply
+            // to a <circle>.
+            if style_sets_any(elem, CSS_GEOMETRY_PROPS) {
+                continue;
+            }
 
             // Absent and "auto" both mean SVG2 auto.
             let rx = elem.attr("rx").filter(|v| v.trim() != "auto");
@@ -151,6 +160,14 @@ mod tests {
     fn css_radius_blocks_conversion() {
         // `rx` applies to <ellipse> but not to <circle>.
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>.a{rx:9px}</style><ellipse class="a" rx="5" ry="5"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
+    }
+
+    #[test]
+    fn style_radius_blocks_conversion() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><ellipse rx="5" ry="5" style="rx:10px"/></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Unchanged);
         assert_eq!(serialize(&doc), input);

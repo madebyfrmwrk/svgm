@@ -1,5 +1,5 @@
 use super::{
-    Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css, parse_svg_number,
+    Pass, PassResult, SHAPE_SENSITIVE_PROPS, has_structural_css, parse_svg_number, style_sets_any,
     stylesheet_declares,
 };
 use crate::ast::{Attribute, Document, NodeKind};
@@ -42,6 +42,12 @@ impl Pass for ConvertShapeToPath {
             match shape_name {
                 "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {}
                 _ => continue,
+            }
+
+            // Geometry (or markers) set in `style=""` override the attributes
+            // the path would be computed from, or stop applying to a path.
+            if style_sets_any(elem, SHAPE_SENSITIVE_PROPS) {
+                continue;
             }
 
             // Safety: skip shapes with pathLength attribute
@@ -487,6 +493,23 @@ mod tests {
             assert_eq!(result, PassResult::Unchanged, "{css}: {output}");
             assert!(output.contains("<rect"), "{css}: {output}");
         }
+    }
+
+    #[test]
+    fn style_geometry_or_markers_block_conversion() {
+        // #48: `style="width:30px"` resizes the rect; a path ignores it.
+        for style in ["width:30px", "X:5", "marker-end:url(#m)", "rx:2px"] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\" style=\"{style}\"/></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{style}: {output}");
+            assert_eq!(output, input);
+        }
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\" style=\"fill:red\"/></svg>",
+        );
+        assert_eq!(result, PassResult::Changed, "{output}");
     }
 
     fn run_pass(input: &str) -> (PassResult, String) {

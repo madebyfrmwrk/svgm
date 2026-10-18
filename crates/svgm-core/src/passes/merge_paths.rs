@@ -93,6 +93,12 @@ fn is_set(value: &str) -> bool {
 /// everything rendered inside it, and an objectBoundingBox clip on a group
 /// is uncommon enough to refuse conservatively.
 fn element_blocks_merge(doc: &Document, id: NodeId) -> bool {
+    // A CSS `d` overrides the attribute the merge concatenates.
+    if let NodeKind::Element(ref elem) = doc.node(id).kind
+        && style_declaration(elem, "d").is_some()
+    {
+        return true;
+    }
     for prop in GEOMETRY_PROPS {
         if let Computed::Static(v) = computed_style_with(doc, id, prop, false)
             && is_set(&v)
@@ -129,7 +135,8 @@ fn element_blocks_merge(doc: &Document, id: NodeId) -> bool {
 /// element via computeStyle).
 fn stylesheet_blocks_merge(doc: &Document) -> bool {
     stylesheet_declarations(doc).iter().any(|(prop, value)| {
-        (GEOMETRY_PROPS.contains(&prop.as_str()) && is_set(value))
+        prop.eq_ignore_ascii_case("d")
+            || (GEOMETRY_PROPS.contains(&prop.as_str()) && is_set(value))
             || (URL_PROPS.contains(&prop.as_str()) && contains_url_ref(value))
     })
 }
@@ -1242,6 +1249,19 @@ mod tests {
         let mut doc = parse(input).unwrap();
         let result = MergePaths::default().run(&mut doc);
         (result, serialize(&doc))
+    }
+
+    #[test]
+    fn css_d_property_blocks_merging() {
+        // `d` in CSS overrides the attribute the merge would concatenate.
+        for input in [
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h5\" style=\"d:path('M20 20h5')\"/><path d=\"M10 0h5\" style=\"d:path('M20 20h5')\"/></svg>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a:hover{d:path('M0 0')}</style><path d=\"M0 0h5\"/><path d=\"M10 0h5\"/></svg>",
+        ] {
+            let (result, output) = run_pass(input);
+            assert_eq!(result, PassResult::Unchanged, "{input}");
+            assert_eq!(output, input);
+        }
     }
 
     // --- Basic merging ---
