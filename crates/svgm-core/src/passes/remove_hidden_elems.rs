@@ -1,9 +1,5 @@
-use super::{Pass, PassResult, parse_svg_number};
+use super::{Pass, PassResult, animation_targets, has_ancestor, parse_svg_number};
 use crate::ast::{Document, NodeId, NodeKind};
-use std::collections::{HashMap, HashSet};
-
-/// Animation element names that can toggle rendering properties.
-const ANIMATION_ELEMS: &[&str] = &["animate", "animateTransform", "animateMotion", "set"];
 
 /// Shape elements where fill="none" + stroke="none" means invisible (if leaf).
 const SHAPE_ELEMS: &[&str] = &[
@@ -32,41 +28,7 @@ impl Pass for RemoveHiddenElems {
         let ids = doc.traverse();
 
         // Phase 1: Build animation target set.
-        // Build id->NodeId map for resolving href targets.
-        let mut id_to_node: HashMap<&str, NodeId> = HashMap::new();
-        for &nid in &ids {
-            if let NodeKind::Element(ref elem) = doc.node(nid).kind
-                && let Some(id_val) = elem.attr("id")
-            {
-                id_to_node.insert(id_val, nid);
-            }
-        }
-
-        let mut animation_targets: HashSet<NodeId> = HashSet::new();
-        for &nid in &ids {
-            if let NodeKind::Element(ref elem) = doc.node(nid).kind
-                && ANIMATION_ELEMS.contains(&elem.name.as_str())
-            {
-                // Target via href or xlink:href
-                let href_target = elem
-                    .attr("href")
-                    .or_else(|| {
-                        elem.attributes
-                            .iter()
-                            .find(|a| a.name == "href" && a.prefix.as_deref() == Some("xlink"))
-                            .map(|a| a.value.as_str())
-                    })
-                    .and_then(|v| v.strip_prefix('#'))
-                    .and_then(|id| id_to_node.get(id).copied());
-
-                if let Some(target) = href_target {
-                    animation_targets.insert(target);
-                } else if let Some(parent) = doc.node(nid).parent {
-                    // Default: animation targets its parent element
-                    animation_targets.insert(parent);
-                }
-            }
-        }
+        let animation_targets = animation_targets(doc);
 
         // Phase 2: Check and remove hidden elements.
         let mut changed = false;
@@ -165,10 +127,10 @@ fn should_remove(doc: &Document, nid: NodeId, elem: &crate::ast::Element, name: 
                 return true;
             }
         }
-        "image" => {
-            if is_explicit_zero(elem.attr("width")) || is_explicit_zero(elem.attr("height")) {
-                return true;
-            }
+        "image"
+            if is_explicit_zero(elem.attr("width")) || is_explicit_zero(elem.attr("height")) =>
+        {
+            return true;
         }
         _ => {}
     }
@@ -207,17 +169,7 @@ fn parse_coord(value: Option<&str>) -> f64 {
 
 /// Walk up the parent chain to check if this node is inside a <defs> or <symbol>.
 fn is_inside_defs_or_symbol(doc: &Document, nid: NodeId) -> bool {
-    let mut current = doc.node(nid).parent;
-    while let Some(pid) = current {
-        if let NodeKind::Element(ref elem) = doc.node(pid).kind {
-            match elem.name.as_str() {
-                "defs" | "symbol" => return true,
-                _ => {}
-            }
-        }
-        current = doc.node(pid).parent;
-    }
-    false
+    has_ancestor(doc, nid, &["defs", "symbol"])
 }
 
 #[cfg(test)]

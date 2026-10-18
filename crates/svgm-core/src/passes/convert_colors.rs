@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, split_declarations, split_property};
 use crate::ast::{Document, NodeKind};
 
 /// Attributes that can contain color values.
@@ -111,13 +111,11 @@ fn shorten_colors_in_style(style: &str) -> Option<String> {
     let mut result = String::with_capacity(style.len());
     let mut any_changed = false;
 
-    for part in style.split(';') {
+    for decl in split_declarations(style) {
         if !result.is_empty() {
             result.push(';');
         }
-        if let Some(colon) = part.find(':') {
-            let prop = part[..colon].trim();
-            let val = part[colon + 1..].trim();
+        if let Some((prop, val)) = split_property(decl) {
             // Check if this is a color property
             if COLOR_ATTRS.contains(&prop)
                 && let Some(shorter) = shorten_color(val)
@@ -130,7 +128,7 @@ fn shorten_colors_in_style(style: &str) -> Option<String> {
                 continue;
             }
         }
-        result.push_str(part);
+        result.push_str(decl);
     }
 
     if any_changed { Some(result) } else { None }

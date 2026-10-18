@@ -33,6 +33,9 @@ pub mod remove_useless_stroke_and_fill;
 pub mod sort_attrs;
 pub mod sort_defs_children;
 
+mod util;
+pub(crate) use util::*;
+
 use crate::ast::Document;
 
 /// Result of running a single optimization pass.

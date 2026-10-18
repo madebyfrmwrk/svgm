@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, split_declarations, split_property};
 use crate::ast::{Attribute, Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -137,16 +137,9 @@ impl Pass for InlineStyles {
                 }
                 // Track style attribute properties
                 if let Some(style_val) = elem.attr("style") {
-                    let props: HashSet<String> = style_val
-                        .split(';')
-                        .filter_map(|decl| {
-                            let parts: Vec<&str> = decl.splitn(2, ':').collect();
-                            if parts.len() == 2 {
-                                Some(parts[0].trim().to_string())
-                            } else {
-                                None
-                            }
-                        })
+                    let props: HashSet<String> = split_declarations(style_val)
+                        .into_iter()
+                        .filter_map(|decl| split_property(decl).map(|(name, _)| name.to_string()))
                         .collect();
                     if !props.is_empty() {
                         style_attr_props.insert(nid, props);
@@ -484,22 +477,13 @@ fn skip_at_rule(s: &str, pos: usize) -> Option<usize> {
 }
 
 /// Parse "property: value; property: value" into pairs.
-fn parse_declarations(block: &str) -> Vec<(String, String)> {
-    let mut decls = Vec::new();
-    for part in block.split(';') {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(colon) = trimmed.find(':') {
-            let prop = trimmed[..colon].trim().to_string();
-            let val = trimmed[colon + 1..].trim().to_string();
-            if !prop.is_empty() && !val.is_empty() {
-                decls.push((prop, val));
-            }
-        }
-    }
-    decls
+pub(crate) fn parse_declarations(block: &str) -> Vec<(String, String)> {
+    split_declarations(block)
+        .into_iter()
+        .filter_map(split_property)
+        .filter(|(_, val)| !val.is_empty())
+        .map(|(prop, val)| (prop.to_string(), val.to_string()))
+        .collect()
 }
 
 // --- Selector classification ---

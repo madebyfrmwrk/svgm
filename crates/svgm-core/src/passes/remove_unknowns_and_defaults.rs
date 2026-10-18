@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{Pass, PassResult};
+use super::{INHERITABLE_PROPS, Pass, PassResult};
 use crate::ast::{Document, NodeId, NodeKind};
 
 pub struct RemoveUnknownsAndDefaults;
@@ -83,53 +83,6 @@ const SKIP_FILL_REMOVAL: &[&str] = &[
     "svg",
 ];
 
-/// Inheritable presentation attributes (matches SVGO's inheritableAttrs minus
-/// presentationNonInheritableGroupAttrs). These inherit from parent to child
-/// in the SVG cascade.
-const INHERITABLE_ATTRS: &[&str] = &[
-    "clip-rule",
-    "color",
-    "color-interpolation",
-    "color-interpolation-filters",
-    "color-profile",
-    "cursor",
-    "direction",
-    "dominant-baseline",
-    "fill",
-    "fill-opacity",
-    "fill-rule",
-    "font",
-    "font-family",
-    "font-size",
-    "font-size-adjust",
-    "font-stretch",
-    "font-style",
-    "font-variant",
-    "font-weight",
-    "image-rendering",
-    "letter-spacing",
-    "marker",
-    "marker-end",
-    "marker-mid",
-    "marker-start",
-    "paint-order",
-    "pointer-events",
-    "shape-rendering",
-    "stroke",
-    "stroke-dasharray",
-    "stroke-dashoffset",
-    "stroke-linecap",
-    "stroke-linejoin",
-    "stroke-miterlimit",
-    "stroke-opacity",
-    "stroke-width",
-    "text-anchor",
-    "text-rendering",
-    "visibility",
-    "word-spacing",
-    "writing-mode",
-];
-
 /// Compute the inherited value for each inheritable attribute by walking the
 /// ancestor chain. Returns a map of attr_name → nearest ancestor's value.
 /// Matches SVGO's computeStyle ancestor-walking logic.
@@ -140,7 +93,7 @@ fn compute_inherited_values(doc: &Document, id: NodeId) -> HashMap<String, Strin
         if let NodeKind::Element(ref elem) = doc.node(parent_id).kind {
             for attr in &elem.attributes {
                 if attr.prefix.is_none()
-                    && INHERITABLE_ATTRS.contains(&attr.name.as_str())
+                    && INHERITABLE_PROPS.contains(&attr.name.as_str())
                     && !values.contains_key(&attr.name)
                 {
                     // Nearest ancestor wins — don't overwrite
@@ -209,7 +162,7 @@ impl Pass for RemoveUnknownsAndDefaults {
                     let is_default = DEFAULT_ATTRS
                         .iter()
                         .any(|&(name, val)| attr.name == name && attr.value == val);
-                    let is_inheritable = INHERITABLE_ATTRS.contains(&attr.name.as_str());
+                    let is_inheritable = INHERITABLE_PROPS.contains(&attr.name.as_str());
 
                     // Check A (SVGO defaultAttrs): remove known defaults
                     if is_default {

@@ -593,11 +593,7 @@ fn parse_and_merge_transforms(s: &str) -> Option<Matrix> {
                 chars.next();
                 break;
             }
-            if let Some(n) = parse_num(&mut chars) {
-                args.push(n);
-            } else {
-                return None;
-            }
+            args.push(parse_num(&mut chars)?);
         }
 
         let m = match name.as_str() {

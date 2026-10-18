@@ -1,4 +1,4 @@
-use super::{Pass, PassResult, parse_svg_number};
+use super::{Pass, PassResult, parse_svg_number, split_declarations, split_property};
 use crate::ast::{Document, NodeKind};
 
 /// Removes or simplifies the deprecated `enable-background` attribute.
@@ -91,20 +91,11 @@ impl Pass for CleanupEnableBackground {
 
 /// Remove a CSS property from an inline style string.
 fn remove_prop_from_style(style: &str, prop: &str) -> String {
-    style
-        .split(';')
-        .filter(|part| {
-            let trimmed = part.trim();
-            if let Some(colon) = trimmed.find(':') {
-                trimmed[..colon].trim() != prop
-            } else {
-                !trimmed.is_empty()
-            }
-        })
+    split_declarations(style)
+        .into_iter()
+        .filter(|decl| split_property(decl).is_none_or(|(name, _)| name != prop))
         .collect::<Vec<_>>()
         .join(";")
-        .trim_matches(';')
-        .to_string()
 }
 
 /// Try to simplify `enable-background="new X Y W H"` to `"new"` when X=0, Y=0

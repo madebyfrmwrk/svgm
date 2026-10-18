@@ -1,29 +1,10 @@
-use super::{Pass, PassResult};
+use super::{MOVEABLE_ELEMENTS, Pass, PassResult, URL_REF_ATTRS};
 use crate::ast::{Document, NodeId, NodeKind};
 
 /// Moves a group's `transform` attribute down to its children when safe.
 /// This enables `collapseGroups` to remove the now-empty group wrapper.
 /// Only processes multi-child groups (single-child is handled by `convertTransform`).
 pub struct MoveGroupAttrsToElems;
-
-/// Elements that can safely receive a transform.
-const MOVEABLE_ELEMENTS: &[&str] = &[
-    "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "text", "use",
-    "image", "svg",
-];
-
-/// Attributes that may contain url() references — if any child has these,
-/// moving the group's transform would break the coordinate space for the reference.
-const URL_REF_ATTRS: &[&str] = &[
-    "clip-path",
-    "fill",
-    "filter",
-    "marker-end",
-    "marker-mid",
-    "marker-start",
-    "mask",
-    "stroke",
-];
 
 impl Pass for MoveGroupAttrsToElems {
     fn name(&self) -> &'static str {

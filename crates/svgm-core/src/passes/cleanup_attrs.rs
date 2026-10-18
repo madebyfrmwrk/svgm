@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, split_declarations, split_property};
 use crate::ast::{Document, NodeKind};
 
 pub struct CleanupAttrs;
@@ -43,25 +43,20 @@ impl Pass for CleanupAttrs {
 }
 
 /// Minify an inline style attribute: strip spaces around colons/semicolons,
-/// remove trailing semicolons.
+/// remove trailing semicolons. Text inside quotes or `url(...)` is left
+/// untouched.
 fn minify_inline_style(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    for (i, part) in s.split(';').enumerate() {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if i > 0 && !result.is_empty() {
+    for decl in split_declarations(s) {
+        if !result.is_empty() {
             result.push(';');
         }
-        if let Some(colon) = trimmed.find(':') {
-            let prop = trimmed[..colon].trim();
-            let val = trimmed[colon + 1..].trim();
+        if let Some((prop, val)) = split_property(decl) {
             result.push_str(prop);
             result.push(':');
             result.push_str(val);
         } else {
-            result.push_str(trimmed);
+            result.push_str(decl);
         }
     }
     result
@@ -112,5 +107,36 @@ mod tests {
         assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Changed);
         let output = serialize(&doc);
         assert!(output.contains("d=\"M 0 0 L 10 10\""));
+    }
+
+    #[test]
+    fn minifies_inline_style() {
+        assert_eq!(
+            minify_inline_style(" fill : red ; stroke:blue; "),
+            "fill:red;stroke:blue"
+        );
+        assert_eq!(minify_inline_style(";;"), "");
+    }
+
+    #[test]
+    fn inline_style_keeps_url_data_uri_intact() {
+        let style = "fill:url(data:image/svg+xml;base64,PHN2Zy8+);stroke:red";
+        assert_eq!(minify_inline_style(style), style);
+        let input =
+            format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"{style}\"/></svg>");
+        let mut doc = parse(&input).unwrap();
+        assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains(style));
+    }
+
+    #[test]
+    fn inline_style_keeps_quoted_strings_intact() {
+        let style = "font-family:\"a; b\"";
+        assert_eq!(minify_inline_style(style), style);
+        let input =
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text style='font-family:\"a; b\"'/></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CleanupAttrs.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains("style=\"font-family:&quot;a; b&quot;\""));
     }
 }
