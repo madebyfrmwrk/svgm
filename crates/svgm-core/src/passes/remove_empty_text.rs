@@ -19,7 +19,9 @@ impl Pass for RemoveEmptyText {
                 // Remove text elements that have no text content children
                 let has_text = doc.children(id).any(|child| {
                     match &doc.node(child).kind {
-                        NodeKind::Text(t) => !t.trim().is_empty(),
+                        // A CDATA section is character data too: `<text><![CDATA[x]]></text>`
+                        // renders "x" exactly like a plain text node.
+                        NodeKind::Text(t) | NodeKind::CData(t) => !t.trim().is_empty(),
                         NodeKind::Element(_) => true, // nested tspan etc.
                         _ => false,
                     }
@@ -59,5 +61,36 @@ mod tests {
         let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><text>Hello</text></svg>"#;
         let mut doc = parse(input).unwrap();
         assert_eq!(RemoveEmptyText.run(&mut doc), PassResult::Unchanged);
+    }
+
+    #[test]
+    fn keeps_text_with_cdata_content() {
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text><![CDATA[a < b]]></text></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveEmptyText.run(&mut doc), PassResult::Unchanged);
+        let output = serialize(&doc);
+        assert!(output.contains("<text>"), "{output}");
+        assert!(
+            output.contains("a &lt; b") || output.contains("<![CDATA[a < b]]>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn keeps_tspan_with_cdata_content() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><text><tspan><![CDATA[hi]]></tspan></text></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveEmptyText.run(&mut doc), PassResult::Unchanged);
+        assert!(serialize(&doc).contains("<tspan>"));
+    }
+
+    #[test]
+    fn removes_text_with_whitespace_only_cdata() {
+        let input =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><text><![CDATA[   ]]></text><rect/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(RemoveEmptyText.run(&mut doc), PassResult::Changed);
+        assert!(!serialize(&doc).contains("<text"));
     }
 }
