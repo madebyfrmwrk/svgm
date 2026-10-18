@@ -288,13 +288,24 @@ fn issue_23_non_ascii_style_is_preserved_and_stable() {
         input.len(),
         out.data.len()
     );
-    assert!(out.data.contains("ǎccent"), "{}", out.data);
+    // The rule is inlined and the class dropped, or both are kept; the
+    // class must never be dropped while the rule remains.
+    let inlined = out.data.contains("fill=\"red\"") && !out.data.contains("<style");
+    let kept = out.data.contains("class=\"ǎccent\"") && out.data.contains(".ǎccent{fill:red}");
+    assert!(inlined || kept, "{}", out.data);
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 
     let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>text{font-family:"Söhne";content:"→"}</style><text>→ Söhne</text></svg>"#;
     let out = svgm_core::optimize(input).unwrap();
-    assert!(out.data.contains("font-family:\"Söhne\""), "{}", out.data);
+    // `font-family` is inlined (quotes escaped) or kept in the rule; either
+    // way the non-ASCII text survives intact.
+    assert!(
+        out.data.contains("font-family=\"&quot;Söhne&quot;\"")
+            || out.data.contains("font-family:\"Söhne\""),
+        "{}",
+        out.data
+    );
     assert!(out.data.contains("→ Söhne"), "{}", out.data);
 }
 
@@ -336,4 +347,47 @@ fn non_finite_numbers_never_reach_the_output() {
     assert_eq!(out.data.matches("inf").count(), 1, "{}", out.data);
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
+}
+
+#[test]
+fn css_structural_selectors() {
+    // Rules inlineStyles cannot evaluate must survive, and the structure
+    // they select on (groups, classes, ids, element names) must stay put.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/css_structural_selectors.svg",
+    ));
+    assert_valid_svg(&output, "css_structural_selectors");
+    // cleanupIds shortens the referenced id `g` to `a` in both places.
+    for rule in [
+        "g rect{fill:red}",
+        ".a rect{fill:red}",
+        "rect[class~=a]{fill:red}",
+        "#a rect{fill:red}",
+    ] {
+        assert!(output.contains(rule), "{rule} missing from {output}");
+    }
+    assert!(output.contains("<g><rect"), "{output}");
+    assert!(output.contains("<g class=\"a\"><rect"), "{output}");
+    assert!(output.contains("<rect class=\"a\""), "{output}");
+    assert!(output.contains("<g id=\"a\"><rect"), "{output}");
+    assert!(!output.contains("<path"), "{output}");
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
+
+#[test]
+fn css_keyframes_only() {
+    // A stylesheet made only of @-rules is still a stylesheet: it must be
+    // kept, and so must the classes its contents refer to.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/css_keyframes_only.svg",
+    ));
+    assert_valid_svg(&output, "css_keyframes_only");
+    assert!(output.contains("@keyframes spin"), "{output}");
+    assert!(output.contains("@font-face"), "{output}");
+    assert!(output.contains("@media print{.p{fill:red}}"), "{output}");
+    assert!(output.contains("class=\"spin p\""), "{output}");
+    assert!(output.contains("font-family:\"My Font\""), "{output}");
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
 }

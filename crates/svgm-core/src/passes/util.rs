@@ -347,7 +347,7 @@ pub(crate) fn has_structural_css(doc: &Document) -> bool {
 }
 
 /// Remove `/* ... */` comments from CSS text.
-fn strip_css_comments(css: &str) -> String {
+pub(crate) fn strip_css_comments(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
     while let Some(start) = rest.find("/*") {
