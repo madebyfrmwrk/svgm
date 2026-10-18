@@ -1,6 +1,6 @@
 use super::{Pass, PassResult};
 use crate::ast::{Document, NodeKind};
-use crate::passes::convert_colors::shorten_color;
+use crate::passes::convert_colors::{COLOR_ATTRS, shorten_color};
 
 pub struct MinifyStyles;
 
@@ -124,45 +124,116 @@ fn minify_css(css: &str) -> String {
     shortened.trim().to_string()
 }
 
-/// Find color values in CSS and shorten them.
+/// Shorten colour values of colour properties inside declaration blocks.
+///
+/// Tracks brace depth so a `:` only starts a value inside a block (never in
+/// `.a:hover`; a selector nested in `@media{...}` is recognised by the `{`
+/// that follows it), reads the property name back to the previous `;`/`{`,
+/// keeps a `!important` suffix, and only touches [`COLOR_ATTRS`] properties
+/// with a replacement that is no longer than the original (`green` stays
+/// `green`, not `#008000`).
 fn shorten_colors_in_css(css: &str) -> String {
-    let mut result = String::with_capacity(css.len());
     let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    // Everything before `copied` has been pushed to `out`.
+    let mut copied = 0;
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut prop_start = 0;
     let mut i = 0;
 
     while i < bytes.len() {
-        // Look for ':' which precedes a value
-        if bytes[i] == b':' {
-            result.push(':');
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
             i += 1;
-
-            // Find the end of the value (';' or '}'). Both delimiters are
-            // ASCII, so `val_start..val_end` always sits on char boundaries.
-            let val_start = i;
-            let mut val_end = i;
-            while val_end < bytes.len() && bytes[val_end] != b';' && bytes[val_end] != b'}' {
-                val_end += 1;
-            }
-
-            let value = &css[val_start..val_end];
-            if let Some(shortened) = shorten_color(value) {
-                result.push_str(&shortened);
-            } else {
-                result.push_str(value);
-            }
-            i = val_end;
-        } else {
-            // Copy everything up to the next ':' verbatim (char-boundary safe;
-            // pushing `bytes[i] as char` re-encoded non-ASCII, issue #23).
-            let start = i;
-            while i < bytes.len() && bytes[i] != b':' {
-                i += 1;
-            }
-            result.push_str(&css[start..i]);
+            continue;
         }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'{' => {
+                depth += 1;
+                prop_start = i + 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                prop_start = i + 1;
+            }
+            b';' => prop_start = i + 1,
+            b':' if depth > 0 => {
+                let prop = css[prop_start..i].trim();
+                let end = value_end(bytes, i + 1);
+                let value = &css[i + 1..end];
+                if value.contains('{') {
+                    // `@media print{.a:hover{...}}`: a pseudo-class in a
+                    // nested selector, not a declaration.
+                    i += 1;
+                    continue;
+                }
+                let trimmed = value.trim();
+                let (color, suffix) = match trimmed.find('!') {
+                    Some(bang) => (trimmed[..bang].trim_end(), &trimmed[bang..]),
+                    None => (trimmed, ""),
+                };
+                if COLOR_ATTRS.contains(&prop)
+                    && let Some(short) = shorten_color(color)
+                    && short.len() <= color.len()
+                    && short != color
+                {
+                    out.push_str(&css[copied..=i]);
+                    out.push_str(&short);
+                    out.push_str(suffix);
+                    copied = end;
+                }
+                // `end` sits on the `;`/`}` (or the end of input), which the
+                // loop handles next.
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
     }
 
-    result
+    out.push_str(&css[copied.min(css.len())..]);
+    out
+}
+
+/// Index of the `;` or `}` ending the value that starts at `from`, skipping
+/// quoted strings and parentheses (`url(data:...;base64,...)`). All stop
+/// bytes are ASCII, so the result is always a char boundary.
+fn value_end(bytes: &[u8], from: usize) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut j = from;
+    while j < bytes.len() {
+        let c = bytes[j];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                j += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'"' | b'\'' => quote = Some(c),
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b';' | b'}' if depth == 0 => return j,
+                _ => {}
+            }
+        }
+        j += 1;
+    }
+    bytes.len()
 }
 
 #[cfg(test)]
@@ -246,5 +317,78 @@ mod tests {
         assert_eq!(result, PassResult::Unchanged);
         assert!(output.contains(".ǎccent{fill:red}"), "{output}");
         assert!(output.len() <= input.len());
+    }
+
+    // --- WP6-38: colour shortening must never lengthen or misfire ---
+
+    #[test]
+    fn named_colors_are_not_lengthened() {
+        assert_eq!(minify_css(".a{fill:green}"), ".a{fill:green}");
+        assert_eq!(minify_css(".a{color:gray}"), ".a{color:gray}");
+        assert_eq!(minify_css(".a{stop-color:white}"), ".a{stop-color:#fff}");
+        let (result, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{fill:green;color:gray}</style></svg>",
+        );
+        assert_eq!(result, PassResult::Unchanged, "{output}");
+    }
+
+    #[test]
+    fn pseudo_class_colon_is_not_a_declaration() {
+        assert_eq!(
+            minify_css(".a:hover{stroke:#FF0000}"),
+            ".a:hover{stroke:red}"
+        );
+        assert_eq!(
+            minify_css("a:not(.x){fill:#FFFFFF;stroke:#000000}"),
+            "a:not(.x){fill:#fff;stroke:#000}"
+        );
+    }
+
+    #[test]
+    fn nested_pseudo_class_colon_is_not_a_declaration() {
+        // Inside @media the selector's `:hover` sits at brace depth 1; it
+        // must not swallow the first declaration of the block.
+        let (_, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@media print{.a:hover{fill:#FFFFFF;stroke:#FF0000}}@media (min-width:100px){.a:hover{fill:#FFFFFF}}</style><rect class=\"a\"/></svg>",
+        );
+        assert!(
+            output.contains("@media print{.a:hover{fill:#fff;stroke:red}}"),
+            "{output}"
+        );
+        assert!(
+            output.contains("@media (min-width:100px){.a:hover{fill:#fff}}"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn important_suffix_is_kept() {
+        let (_, output) = run_pass(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.a{fill:#FFFFFF!important;stroke:#FF0000 !important}</style><rect class=\"a\"/></svg>",
+        );
+        assert!(
+            output.contains(".a{fill:#fff!important;stroke:red!important}"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn only_color_properties_are_shortened() {
+        assert_eq!(
+            minify_css(".a{font-family:White;content:\"#ffffff\"}"),
+            ".a{font-family:White;content:\"#ffffff\"}"
+        );
+        assert_eq!(
+            minify_css("@media (min-width:#fff){.a{fill:#ffffff}}"),
+            "@media (min-width:#fff){.a{fill:#fff}}"
+        );
+        assert_eq!(
+            minify_css(".a{fill:url(data:image/svg+xml;base64,AA==);stroke:#ff0000}"),
+            ".a{fill:url(data:image/svg+xml;base64,AA==);stroke:red}"
+        );
+        assert_eq!(
+            minify_css(".a{fill:#aǎ;stroke:#FFF}"),
+            ".a{fill:#aǎ;stroke:#fff}"
+        );
     }
 }

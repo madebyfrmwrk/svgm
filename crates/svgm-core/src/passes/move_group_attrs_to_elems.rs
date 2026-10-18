@@ -1,6 +1,6 @@
 use super::{
     MOVEABLE_ELEMENTS, Pass, PassResult, has_animated_attr_deep, has_animation_child,
-    has_group_only_prop, has_url_reference, style_declaration,
+    has_group_only_prop, has_structural_css, has_url_reference, style_declaration,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -15,6 +15,12 @@ impl Pass for MoveGroupAttrsToElems {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
+        // A surviving stylesheet may set `transform` on the group or its
+        // children by selector; moving the attribute would change the cascade.
+        if has_structural_css(doc) {
+            return PassResult::Unchanged;
+        }
+
         let mut changed = false;
         let ids = doc.traverse();
 
@@ -147,6 +153,14 @@ mod tests {
     use super::*;
     use crate::parser::parse;
     use crate::serializer::serialize;
+
+    #[test]
+    fn structural_css_blocks_moving() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>g path{fill:red}</style><g transform=\"translate(1 2)\"><path d=\"M0 0h1\"/><path d=\"M1 1h1\"/></g></svg>";
+        let mut doc = parse(input).unwrap();
+        assert_eq!(MoveGroupAttrsToElems.run(&mut doc), PassResult::Unchanged);
+        assert_eq!(serialize(&doc), input);
+    }
 
     #[test]
     fn moves_transform_to_children() {

@@ -2,7 +2,7 @@ use super::{Pass, PassResult, split_declarations, split_property};
 use crate::ast::{Document, NodeKind};
 
 /// Attributes that can contain color values.
-const COLOR_ATTRS: &[&str] = &[
+pub(crate) const COLOR_ATTRS: &[&str] = &[
     "fill",
     "stroke",
     "stop-color",

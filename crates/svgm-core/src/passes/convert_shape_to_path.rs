@@ -1,4 +1,4 @@
-use super::{Pass, PassResult, parse_svg_number};
+use super::{Pass, PassResult, has_structural_css, parse_svg_number};
 use crate::ast::{Attribute, Document, NodeKind};
 
 pub struct ConvertShapeToPath {
@@ -17,6 +17,12 @@ impl Pass for ConvertShapeToPath {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
+        // Renaming `<rect>` to `<path>` would stop type selectors
+        // (`rect{...}`, `rect[class~=a]`) in a surviving stylesheet matching.
+        if has_structural_css(doc) {
+            return PassResult::Unchanged;
+        }
+
         let mut changed = false;
         let ids = doc.traverse();
 
@@ -425,6 +431,22 @@ mod tests {
     use super::*;
     use crate::parser::parse;
     use crate::serializer::serialize;
+
+    #[test]
+    fn structural_css_blocks_conversion() {
+        for css in [
+            "rect{fill:red}",
+            "rect[class~=a]{fill:red}",
+            "g rect{fill:red}",
+        ] {
+            let input = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><g><rect class=\"a\" width=\"10\" height=\"10\"/></g></svg>"
+            );
+            let (result, output) = run_pass(&input);
+            assert_eq!(result, PassResult::Unchanged, "{css}: {output}");
+            assert!(output.contains("<rect"), "{css}: {output}");
+        }
+    }
 
     fn run_pass(input: &str) -> (PassResult, String) {
         let mut doc = parse(input).unwrap();

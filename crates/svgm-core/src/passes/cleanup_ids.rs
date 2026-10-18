@@ -1,4 +1,6 @@
-use super::{Pass, PassResult, has_scripts, is_css_ident_char, unescape_css_ident};
+use super::{
+    Pass, PassResult, has_scripts, inside_foreign_object, is_css_ident_char, unescape_css_ident,
+};
 use crate::ast::{Document, NodeId, NodeKind};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -16,6 +18,11 @@ use std::ops::Range;
 ///   scripts look ids up at runtime;
 /// - the root `<svg>` contains nothing but `<defs>` (a sprite sheet whose
 ///   ids are referenced from other documents).
+///
+/// Elements inside `<foreignObject>` are HTML: their ids are neither removed
+/// nor renamed, but they are reserved so no SVG id is renamed onto one of
+/// them (`url(#a)` would then resolve to the HTML element, first in tree
+/// order).
 ///
 /// SVGO additionally bails on any non-empty `<style>`. svgm instead scans
 /// the stylesheet for references, but still bails when it uses `:target`,
@@ -38,13 +45,26 @@ impl Pass for CleanupIds {
         let mut skipped = Vec::new();
         collect_nodes(doc, doc.root, &mut ids, &mut skipped);
 
+        // Elements inside <foreignObject> are HTML (SVGO skips the subtree):
+        // their ids are left alone but reserved below.
+        let foreign: HashSet<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|&id| inside_foreign_object(doc, id))
+            .collect();
+
         // Phase 1: collect all id declarations.
         let mut declared: HashSet<String> = HashSet::new();
+        let mut foreign_ids: HashSet<String> = HashSet::new();
         for &id in &ids {
             if let NodeKind::Element(ref elem) = doc.node(id).kind
                 && let Some(id_val) = elem.attr("id")
             {
-                declared.insert(id_val.to_string());
+                if foreign.contains(&id) {
+                    foreign_ids.insert(id_val.to_string());
+                } else {
+                    declared.insert(id_val.to_string());
+                }
             }
         }
         if declared.is_empty() {
@@ -121,8 +141,9 @@ impl Pass for CleanupIds {
             .collect();
 
         // Phase 3: build the rename map. Generated names must not collide
-        // with dangling references (svg/svgo#1815) or with ids declared in
-        // skipped subtrees.
+        // with dangling references (svg/svgo#1815), with ids declared in
+        // skipped subtrees, or with ids of HTML elements inside
+        // <foreignObject>.
         let mut reserved: HashSet<String> = refs_in_order
             .iter()
             .filter(|r| !declared.contains(*r))
@@ -131,6 +152,7 @@ impl Pass for CleanupIds {
         for &root in &skipped {
             collect_declared_ids(doc, root, &mut reserved);
         }
+        reserved.extend(foreign_ids);
 
         let mut generator = IdGenerator::new();
         let mut rename_map: HashMap<String, String> = HashMap::new();
@@ -150,13 +172,17 @@ impl Pass for CleanupIds {
         let mut changed = false;
 
         for &id in &ids {
+            let is_foreign = foreign.contains(&id);
             let node = doc.node_mut(id);
             match &mut node.kind {
                 NodeKind::Element(elem) => {
-                    if let Some(id_attr_pos) = elem
-                        .attributes
-                        .iter()
-                        .position(|a| a.name == "id" && a.prefix.is_none())
+                    // Ids of HTML elements inside <foreignObject> are neither
+                    // removed nor renamed; their references still are.
+                    if !is_foreign
+                        && let Some(id_attr_pos) = elem
+                            .attributes
+                            .iter()
+                            .position(|a| a.name == "id" && a.prefix.is_none())
                     {
                         let id_val = elem.attributes[id_attr_pos].value.clone();
                         if !referenced.contains(id_val.as_str()) {
@@ -1226,5 +1252,97 @@ mod tests {
         let result1 = crate::optimize(input).unwrap();
         let result2 = crate::optimize(&result1.data).unwrap();
         assert_eq!(result1.data, result2.data, "should converge");
+    }
+
+    // --- foreignObject, quoted url() and non-ASCII CSS ids (WP6) ---
+
+    #[test]
+    fn css_id_prefix_of_longer_ident_is_not_a_reference() {
+        // `#ǎxy` is a different identifier from `#ǎx`.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#ǎxy{opacity:.5}</style><rect id=\"ǎx\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(!output.contains("id="), "{output}");
+        assert!(output.contains("#ǎxy{opacity:.5}"), "{output}");
+    }
+
+    #[test]
+    fn generated_ids_skip_names_used_inside_foreign_object() {
+        // The HTML <div id="a"> keeps its id, so the clipPath must not be
+        // renamed to `a`: `url(#a)` would resolve to the <div> (first in
+        // tree order) and the clip would be lost.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\">hi</div></foreignObject><defs><clipPath id=\"clip_long\"><rect width=\"5\" height=\"5\"/></clipPath></defs><rect clip-path=\"url(#clip_long)\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(
+            output.contains("<div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\">"),
+            "{output}"
+        );
+        assert!(output.contains("<clipPath id=\"b\">"), "{output}");
+        assert!(output.contains("clip-path=\"url(#b)\""), "{output}");
+        assert!(!output.contains("clip_long"), "{output}");
+    }
+
+    #[test]
+    fn generated_ids_skip_several_reserved_names() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad_one\"/><linearGradient id=\"grad_two\"/></defs><rect fill=\"url(#grad_one)\" stroke=\"url(#grad_two)\"/><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"a\"><span id=\"b\">x</span></div></foreignObject></svg>";
+        let (_, output) = run_pass(input);
+        assert!(
+            output.contains("<linearGradient id=\"c\"></linearGradient><linearGradient id=\"d\">"),
+            "{output}"
+        );
+        assert!(
+            output.contains("fill=\"url(#c)\" stroke=\"url(#d)\""),
+            "{output}"
+        );
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("id=\"b\""), "{output}");
+    }
+
+    #[test]
+    fn ids_inside_foreign_object_are_left_alone() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><clipPath id=\"clip_long\"><rect/></clipPath></defs><rect clip-path=\"url(#clip_long)\"/><foreignObject><div xmlns=\"http://www.w3.org/1999/xhtml\" id=\"html-unused\"><p id=\"para\">x</p></div></foreignObject></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("url(#a)"), "{output}");
+        assert!(output.contains("id=\"html-unused\""), "{output}");
+        assert!(output.contains("id=\"para\""), "{output}");
+    }
+
+    #[test]
+    fn quoted_url_references_are_renamed() {
+        // SVGO cleanupIds.01: fill="url('#gradient001')"
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"gradient001\"/><linearGradient id=\"gradient002\"/><linearGradient id=\"gradient003\"/></defs><rect fill=\"url('#gradient001')\"/><rect fill=\"url(&quot;#gradient002&quot;)\"/><rect fill=\"url( #gradient003 )\"/><rect fill=\"url(data:image/png;base64,#notanid)\"/></svg>";
+        let (_, output) = run_pass(input);
+        assert!(output.contains("fill=\"url('#a')\""), "{output}");
+        assert!(output.contains("fill=\"url(&quot;#b&quot;)\""), "{output}");
+        assert!(output.contains("fill=\"url( #c )\""), "{output}");
+        assert!(
+            output.contains("url(data:image/png;base64,#notanid)"),
+            "{output}"
+        );
+        assert!(!output.contains("gradient00"), "{output}");
+    }
+
+    #[test]
+    fn shortens_non_ascii_css_id_reference() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>#ǎx{opacity:.5}</style><rect id=\"ǎx\" width=\"10\" height=\"10\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert!(output.contains("id=\"a\""), "{output}");
+        assert!(output.contains("#a{opacity:.5}"), "{output}");
+        assert!(!output.contains("ǎx"), "{output}");
+    }
+
+    #[test]
+    fn url_arg_shapes() {
+        // The shapes WP6's `split_url_arg` accepted, through the scanner.
+        assert_eq!(extract_url_refs("url(#x)"), vec!["x"]);
+        assert_eq!(extract_url_refs("url('#x')"), vec!["x"]);
+        assert_eq!(extract_url_refs("url( \"#x\" )"), vec!["x"]);
+        assert!(extract_url_refs("url(data:x)").is_empty());
+        assert!(extract_url_refs("url('#x)").is_empty());
+        assert!(extract_url_refs("url(#)").is_empty());
     }
 }

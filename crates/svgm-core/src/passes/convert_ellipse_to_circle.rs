@@ -1,4 +1,4 @@
-use super::{Pass, PassResult};
+use super::{Pass, PassResult, has_structural_css};
 use crate::ast::{Attribute, Document, NodeKind};
 
 /// Converts `<ellipse>` to `<circle>` when `rx` equals `ry`, or when one
@@ -12,6 +12,13 @@ impl Pass for ConvertEllipseToCircle {
     }
 
     fn run(&self, doc: &mut Document) -> PassResult {
+        // A stylesheet may select on the element name (`g ellipse`,
+        // `ellipse:first-child`): renaming the element would change which
+        // rules apply. Same guard as convertShapeToPath.
+        if has_structural_css(doc) {
+            return PassResult::Unchanged;
+        }
+
         let mut changed = false;
         let ids = doc.traverse();
 
@@ -117,5 +124,25 @@ mod tests {
             serialize(&doc),
             r#"<svg xmlns="http://www.w3.org/2000/svg"><circle cx="10" cy="10" r="7"/><circle r="4"/></svg>"#
         );
+    }
+
+    #[test]
+    fn structural_css_blocks_conversion() {
+        // `g ellipse{fill:red}` would stop matching after the rename and
+        // `g circle{fill:blue}` would start to: the shape must stay an ellipse.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style>g ellipse{fill:red}g circle{fill:blue}</style><g><ellipse rx="5" ry="5"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Unchanged);
+        let output = serialize(&doc);
+        assert!(output.contains("<ellipse rx=\"5\" ry=\"5\"/>"), "{output}");
+        assert!(!output.contains("<circle"), "{output}");
+    }
+
+    #[test]
+    fn empty_stylesheet_does_not_block_conversion() {
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><style> </style><ellipse rx="5" ry="5"/></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(ConvertEllipseToCircle.run(&mut doc), PassResult::Changed);
+        assert!(serialize(&doc).contains("<circle r=\"5\"/>"));
     }
 }
