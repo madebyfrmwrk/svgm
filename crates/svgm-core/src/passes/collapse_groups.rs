@@ -1,5 +1,5 @@
-use super::{Pass, PassResult};
-use crate::ast::{Document, NodeId, NodeKind};
+use super::{Pass, PassResult, split_declarations, split_property, strip_important};
+use crate::ast::{Document, Element, NodeId, NodeKind};
 
 /// Attributes that have different semantics on a `<g>` than on individual elements.
 /// clip-path/mask/filter on a group clip/mask/filter the composited result of all children,
@@ -91,10 +91,7 @@ fn hoist_children(doc: &mut Document, group_id: NodeId, parent_id: NodeId) {
 
 /// Check if group attributes can be safely merged into the child element.
 /// Handles transform specially — allows composing group + child transforms.
-fn can_merge_attrs_with_transform(
-    group: &crate::ast::Element,
-    child: &crate::ast::Element,
-) -> bool {
+fn can_merge_attrs_with_transform(group: &Element, child: &Element) -> bool {
     for g_attr in &group.attributes {
         // Transform can be composed (prepend group's to child's)
         if g_attr.name == "transform" && g_attr.prefix.is_none() {
@@ -109,7 +106,32 @@ fn can_merge_attrs_with_transform(
             return false;
         }
     }
-    true
+    // A `style=""` declaration and a presentation attribute for the same
+    // property are not interchangeable: on one element the inline style
+    // always wins. Moving `<g style="fill:red">` onto `<path fill="black">`
+    // would turn the path red, and moving `<g transform>` onto a child whose
+    // style declares `transform` would have the composed attribute ignored.
+    // SVGO 4.0.1 merges these anyway (and renders wrong); svgm refuses.
+    !style_conflicts_with_attrs(group, child) && !style_conflicts_with_attrs(child, group)
+}
+
+/// True when `styled`'s `style=""` declares a property that `other` carries
+/// as a presentation attribute with a different value (`transform` conflicts
+/// regardless of value, since it would be composed rather than copied).
+fn style_conflicts_with_attrs(styled: &Element, other: &Element) -> bool {
+    let Some(style) = styled.attr("style") else {
+        return false;
+    };
+    split_declarations(style)
+        .into_iter()
+        .filter_map(split_property)
+        .any(|(name, value)| {
+            // CSS property names are case-insensitive; attribute names are not.
+            let prop = name.to_ascii_lowercase();
+            other.attr(&prop).is_some_and(|attr_value| {
+                prop == "transform" || strip_important(value) != attr_value.trim()
+            })
+        })
 }
 
 /// Merge the group's attributes into its single child, then hoist the child.
@@ -242,6 +264,56 @@ mod tests {
         // The id goes to the child. Let's check: can_merge_attrs allows it since child has no id.
         let result = CollapseGroups.run(&mut doc);
         assert_eq!(result, PassResult::Changed);
+    }
+
+    #[test]
+    fn keeps_group_whose_style_overrides_child_attr() {
+        // Inline style beats a presentation attribute on the same element:
+        // merging would turn the black path red / give the stroke-less path
+        // a 3px red stroke.
+        for input in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="fill:red"><path fill="black" d="M0 0h5v5z"/></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="stroke:red;stroke-width:3"><path stroke="none" stroke-width="1" d="M0 5h5v5z"/></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="fill:red !important"><path fill="black" d="M0 0h5v5z"/></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="FILL:red"><path fill="black" d="M0 0h5v5z"/></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="transform:rotate(45deg)"><path transform="translate(1 1)" d="M0 0h5v5z"/></g></svg>"#,
+        ] {
+            let mut doc = parse(input).unwrap();
+            assert_eq!(
+                CollapseGroups.run(&mut doc),
+                PassResult::Unchanged,
+                "{input}"
+            );
+            assert_eq!(serialize(&doc), input);
+        }
+    }
+
+    #[test]
+    fn keeps_group_whose_attr_is_overridden_by_child_style() {
+        // The symmetric case: the child's style would override the moved
+        // attribute (and a composed transform attribute would be ignored).
+        for input in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g fill="red"><path style="fill:black" d="M0 0h5v5z"/></g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g transform="translate(1 1)"><path style="transform:rotate(45deg)" d="M0 0h5v5z"/></g></svg>"#,
+        ] {
+            let mut doc = parse(input).unwrap();
+            assert_eq!(
+                CollapseGroups.run(&mut doc),
+                PassResult::Unchanged,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn merges_group_style_when_child_attr_agrees() {
+        // Same property, same value: moving the style changes nothing.
+        let input = r#"<svg xmlns="http://www.w3.org/2000/svg"><g style="fill:red"><path fill="red" d="M0 0h5v5z"/></g></svg>"#;
+        let mut doc = parse(input).unwrap();
+        assert_eq!(CollapseGroups.run(&mut doc), PassResult::Changed);
+        let output = serialize(&doc);
+        assert!(!output.contains("<g"), "{output}");
+        assert!(output.contains(r#"style="fill:red""#), "{output}");
     }
 
     // ── Reference safety tests ─────────────────────────────────────────

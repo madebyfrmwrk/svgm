@@ -519,3 +519,29 @@ fn regression_feather_info() {
     let again = svgm_core::optimize(&default).unwrap();
     assert_eq!(again.data, default, "not idempotent");
 }
+
+#[test]
+fn regression_group_style_vs_child_attr() {
+    let (default, safe) = optimize_fixture_both_presets("group_style_vs_child_attr.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // A group's style="" must not be merged onto a child whose
+        // presentation attribute it would override (no <style> here, so the
+        // ancestor values are static and collapseGroups is the only guard).
+        assert_eq!(
+            output.matches("fill=\"#000\"").count() + output.matches("fill=\"black\"").count(),
+            3,
+            "{preset}: the three fill=black paths must stay black: {output}"
+        );
+        // (stroke-width="1" is legitimately dropped: the path's own
+        // stroke="none" makes it useless, as in SVGO.)
+        assert!(
+            output.contains("stroke=\"none\""),
+            "{preset}: stroke=none override must survive: {output}"
+        );
+        assert_eq!(
+            output.matches("<g").count(),
+            4,
+            "{preset}: all four groups must be kept: {output}"
+        );
+    }
+}

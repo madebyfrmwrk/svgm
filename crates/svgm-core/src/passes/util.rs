@@ -546,7 +546,7 @@ pub(crate) fn split_property(decl: &str) -> Option<(&str, &str)> {
 }
 
 /// Strip a trailing `!important` (any case, any inner whitespace) and trim.
-fn strip_important(value: &str) -> &str {
+pub(crate) fn strip_important(value: &str) -> &str {
     let v = value.trim();
     const KW: &str = "important";
     if v.len() >= KW.len() && v[v.len() - KW.len()..].eq_ignore_ascii_case(KW) {
@@ -559,13 +559,14 @@ fn strip_important(value: &str) -> &str {
 }
 
 /// Value of `prop` in the element's unprefixed `style` attribute (last
-/// occurrence wins), with a trailing `!important` stripped.
+/// occurrence wins), with a trailing `!important` stripped. Property names
+/// are ASCII case-insensitive (`FILL:red` sets `fill`), as in CSS.
 pub(crate) fn style_declaration(elem: &Element, prop: &str) -> Option<String> {
     let style = elem.attr("style")?;
     let mut found = None;
     for decl in split_declarations(style) {
         if let Some((name, value)) = split_property(decl)
-            && name == prop
+            && name.eq_ignore_ascii_case(prop)
         {
             found = Some(strip_important(value).to_string());
         }
@@ -830,6 +831,13 @@ mod tests {
         let doc = parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#).unwrap();
         let e = elem(&doc, find(&doc, "rect")).unwrap();
         assert_eq!(style_declaration(e, "fill"), None);
+
+        // CSS property names are case-insensitive.
+        let doc =
+            parse(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect style="FILL:red"/></svg>"#)
+                .unwrap();
+        let e = elem(&doc, find(&doc, "rect")).unwrap();
+        assert_eq!(style_declaration(e, "fill"), Some("red".to_string()));
     }
 
     #[test]
