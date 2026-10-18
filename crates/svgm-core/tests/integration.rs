@@ -380,3 +380,37 @@ fn regression_cdata_text() {
         );
     }
 }
+
+#[test]
+fn regression_defaults_ancestor_style() {
+    let (default, safe) = optimize_fixture_both_presets("defaults_ancestor_style.svg");
+    for (preset, output) in [("default", &default), ("safe", &safe)] {
+        // Ancestors set fill/stroke via style="" or stylesheet rules, so the
+        // "default-looking" values on the paths are real overrides.
+        assert_eq!(
+            output.matches("fill=\"#000\"").count() + output.matches("fill=\"black\"").count(),
+            3,
+            "{preset}: the three fill=black overrides must survive: {output}"
+        );
+        assert_eq!(
+            output.matches("stroke=\"none\"").count(),
+            2,
+            "{preset}: both stroke=none overrides must survive: {output}"
+        );
+        assert!(
+            output.contains("stroke-width=\"1\""),
+            "{preset}: stroke-width=1 override must survive: {output}"
+        );
+        // fill="red" under <g fill="red" style="fill:blue"> is an override.
+        assert!(
+            output.contains("fill=\"red\"") && output.contains("fill:blue"),
+            "{preset}: {output}"
+        );
+        // overflow="visible" is not a default on svg/image.
+        assert_eq!(
+            output.matches("overflow=\"visible\"").count(),
+            2,
+            "{preset}: {output}"
+        );
+    }
+}
