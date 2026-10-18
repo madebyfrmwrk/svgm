@@ -527,12 +527,24 @@ fn try_cubic_to_quad(
     }
 }
 
-/// Check if point (px, py) is collinear with the line from (x0, y0) to (x1, y1).
+/// Check if control point (px, py) lies on the chord from (x0, y0) to
+/// (x1, y1), i.e. its perpendicular distance to the chord is within
+/// `10^-precision` (SVGO isCurveStraightLine). A curve whose end point equals
+/// its start has no chord and is never considered straight — flattening a
+/// closed single-cubic loop would delete it. The raw cross product is not
+/// used because it scales with the chord length: a 0.07-unit bulge on a
+/// 0.003-long chord looks tiny, while a 1e-8 bulge on a 7-unit chord looks
+/// large.
 fn is_collinear(x0: f64, y0: f64, px: f64, py: f64, x1: f64, y1: f64, precision: u32) -> bool {
-    // Cross product of vectors (x1-x0, y1-y0) and (px-x0, py-y0)
-    let cross = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0);
-    let tolerance = 0.5 / 10f64.powi(precision as i32);
-    cross.abs() < tolerance
+    let a = -(y1 - y0);
+    let b = x1 - x0;
+    let len_sq = a * a + b * b;
+    if len_sq == 0.0 || !len_sq.is_finite() {
+        return false;
+    }
+    let error = 10f64.powi(-(precision as i32));
+    let proj = a * (px - x0) + b * (py - y0);
+    (proj * proj / len_sq).sqrt() <= error
 }
 
 // ── Cubic-to-arc conversion ────────────────────────────────────────────
@@ -2192,6 +2204,33 @@ mod tests {
         assert_eq!(cmds.iter().map(|c| c.cmd).collect::<String>(), "Mhzmhz");
         // Later `m` subpaths stay relative; the serialized form is unchanged.
         assert_eq!(serialize_path(&cmds, 3), "M5 5h10zm20 0h5z");
+    }
+
+    #[test]
+    fn straight_curve_detection_uses_perpendicular_distance() {
+        // A cubic that ends where it starts has no chord: never flattened
+        // (the old cross-product test saw 0 and erased the whole loop).
+        let out = optimize_path("M5 5C9 1 9 9 5 5", 3).unwrap();
+        assert!(out.contains('c') || out.contains('C'), "{out}");
+        let out = optimize_path("M5 5C9 1 9 9 5.0001 5", 3).unwrap();
+        assert!(out.contains('c') || out.contains('C'), "{out}");
+        // Short chord, visible bulge (~0.07 units): stays a curve (SVGO:
+        // `M0 0q.15-.15.002.002`).
+        let out = optimize_path("M0 0C.1-.1 .1-.1 .002 .002", 3).unwrap();
+        assert!(out.starts_with("M0 0Q.15-.15"), "{out}");
+        assert!(!out.contains("M0 0 .002"), "{out}");
+        // SVGO convertPathData.17 at precision 8: a long near-straight curve
+        // (control point 7e-9 off the chord) becomes a line.
+        let out = optimize_path(
+            "M33.027833,1.96545901 C33.097408,2.03503401 38.0413624,6.97898843 38.0413624,6.97898842",
+            8,
+        )
+        .unwrap();
+        assert!(out.starts_with("M33.027833 1.965459"), "{out}");
+        assert!(out.contains("l5.0135294 5.0135294"), "{out}");
+        assert!(!out.contains('c') && !out.contains('C'), "{out}");
+        // Genuinely straight control points still collapse at p=3.
+        assert_eq!(optimize_path("M0 0C1 1 2 2 3 3", 3).unwrap(), "M0 0 3 3");
     }
 
     #[test]
