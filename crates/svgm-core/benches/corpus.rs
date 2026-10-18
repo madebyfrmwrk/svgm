@@ -46,7 +46,7 @@ fn main() {
     let mut svg_files: Vec<_> = fs::read_dir(&corpus_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "svg"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "svg"))
         .collect();
     svg_files.sort_by_key(|e| e.file_name());
 
@@ -109,18 +109,17 @@ fn main() {
         };
 
         // Check for regression against baseline
-        if let Some(ref bl) = baseline {
-            if let Some(bl_entry) = bl.files.get(&name) {
-                if output_bytes > bl_entry.output_bytes {
-                    regressions.push(format!(
-                        "{}: output {} bytes > baseline {} bytes (+{} bytes)",
-                        name,
-                        output_bytes,
-                        bl_entry.output_bytes,
-                        output_bytes - bl_entry.output_bytes
-                    ));
-                }
-            }
+        if let Some(ref bl) = baseline
+            && let Some(bl_entry) = bl.files.get(&name)
+            && output_bytes > bl_entry.output_bytes
+        {
+            regressions.push(format!(
+                "{}: output {} bytes > baseline {} bytes (+{} bytes)",
+                name,
+                output_bytes,
+                bl_entry.output_bytes,
+                output_bytes - bl_entry.output_bytes
+            ));
         }
 
         println!(

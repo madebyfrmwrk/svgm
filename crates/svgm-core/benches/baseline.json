@@ -1,28 +1,28 @@
 {
   "files": {
     "test-1.svg": {
-      "output_bytes": 9745
+      "output_bytes": 6966
     },
     "test-2.svg": {
-      "output_bytes": 4765
+      "output_bytes": 3267
     },
     "test-3.svg": {
-      "output_bytes": 12792
+      "output_bytes": 8661
     },
     "test-4.svg": {
-      "output_bytes": 2718
+      "output_bytes": 1957
     },
     "test-5.svg": {
-      "output_bytes": 14106
+      "output_bytes": 13624
     },
     "test-6.svg": {
-      "output_bytes": 27902
+      "output_bytes": 19275
     },
     "test-7-transforms.svg": {
-      "output_bytes": 483
+      "output_bytes": 442
     },
     "test-8-figma-transforms.svg": {
-      "output_bytes": 1052
+      "output_bytes": 937
     }
   }
 }

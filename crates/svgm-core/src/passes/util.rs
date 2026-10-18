@@ -8,7 +8,6 @@
 //! Several helpers are consumed only by later work packages (WP1-WP6); the
 //! module-level `dead_code` allowance below should be dropped once they are
 //! all in use.
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 
@@ -251,19 +250,6 @@ pub(crate) fn animation_targets(doc: &Document) -> HashSet<NodeId> {
         }
     }
     targets
-}
-
-/// True when a direct child of `id` is an animation element (`animate`,
-/// `animateColor`, `animateMotion`, `animateTransform`, `set`) whose
-/// `attributeName` equals `attr_name`.
-pub(crate) fn has_animated_attr(doc: &Document, id: NodeId, attr_name: &str) -> bool {
-    doc.children(id).any(|c| {
-        elem(doc, c).is_some_and(|e| {
-            e.prefix.is_none()
-                && ANIMATION_ELEMS.contains(&e.name.as_str())
-                && e.attr("attributeName") == Some(attr_name)
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -702,16 +688,6 @@ pub(crate) enum Computed {
     Unset,
 }
 
-/// Resolve `prop` on element `id`: the `style` attribute declaration beats
-/// the presentation attribute; `inherit` continues to the parent; an
-/// inheritable property ([`INHERITABLE_PROPS`]) walks the ancestors (nearest
-/// wins). Returns [`Computed::Dynamic`] when the document has a stylesheet or
-/// script.
-pub(crate) fn computed_style(doc: &Document, id: NodeId, prop: &str) -> Computed {
-    let dynamic = has_stylesheet(doc) || has_scripts(doc);
-    computed_style_with(doc, id, prop, dynamic)
-}
-
 /// [`computed_style`] with a precomputed `dynamic` flag
 /// (`has_stylesheet(doc) || has_scripts(doc)`) so loops do not re-scan the
 /// document per element.
@@ -817,7 +793,7 @@ pub(crate) fn descendants(doc: &Document, id: NodeId) -> Vec<NodeId> {
 
 /// SVGO's recursive `hasAnimatedAttr`: true when `id` itself or any
 /// descendant is an animation element whose `attributeName` is `attr_name`.
-/// [`has_animated_attr`] only looks at direct children.
+/// Unlike a direct-children check, this walks the whole subtree.
 pub(crate) fn has_animated_attr_deep(doc: &Document, id: NodeId, attr_name: &str) -> bool {
     std::iter::once(id).chain(descendants(doc, id)).any(|n| {
         elem(doc, n)
@@ -836,6 +812,11 @@ pub(crate) fn stylesheet_contains(doc: &Document, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Convenience used by older tests: dynamic flag derived from the document.
+    fn computed_style(doc: &Document, id: NodeId, prop: &str) -> Computed {
+        computed_style_with(doc, id, prop, has_stylesheet(doc) || has_scripts(doc))
+    }
     use crate::parser::parse;
 
     fn find(doc: &Document, name: &str) -> NodeId {
@@ -910,9 +891,13 @@ mod tests {
         )
         .unwrap();
         let g = find(&doc, "g");
-        assert!(has_animated_attr(&doc, g, "transform"));
-        assert!(!has_animated_attr(&doc, g, "fill"));
-        assert!(has_animated_attr(&doc, find(&doc, "rect"), "fill"));
+        assert!(has_animated_attr_deep(&doc, g, "transform"));
+        assert!(has_animated_attr_deep(&doc, find(&doc, "rect"), "fill"));
+        assert!(!has_animated_attr_deep(
+            &doc,
+            find(&doc, "rect"),
+            "transform"
+        ));
     }
 
     #[test]

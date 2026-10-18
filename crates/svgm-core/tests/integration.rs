@@ -182,7 +182,7 @@ fn path_torture_fixtures() {
     let mut count = 0;
     for entry in fs::read_dir(fixture_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().map_or(false, |e| e == "svg") {
+        if path.extension().is_some_and(|e| e == "svg") {
             let name = path.file_name().unwrap().to_str().unwrap().to_string();
             let (output, _input_size, _output_size) = optimize_file(&path);
 
@@ -218,7 +218,7 @@ fn path_torture_structural_equivalence() {
     );
     for entry in fs::read_dir(fixture_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().map_or(false, |e| e == "svg") {
+        if path.extension().is_some_and(|e| e == "svg") {
             let name = path.file_name().unwrap().to_str().unwrap().to_string();
             let input = fs::read_to_string(&path).unwrap();
             let output = svgm_core::optimize(&input).unwrap().data;
@@ -242,7 +242,7 @@ fn real_svgs_parse_and_optimize() {
     }
     for entry in fs::read_dir(fixture_dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().map_or(false, |e| e == "svg") {
+        if path.extension().is_some_and(|e| e == "svg") {
             let (output, input_size, output_size) = optimize_file(&path);
             let name = path.file_name().unwrap().to_str().unwrap();
             assert_valid_svg(&output, name);

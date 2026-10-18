@@ -108,19 +108,18 @@ SVGM auto-discovers the config by walking up from the input file's directory. Us
 
 ## Benchmarks
 
-100 real-world SVG logos (Figma, Illustrator, Inkscape, svgrepo exports). 902.7 KiB total original size.
+100 real-world SVG logos (Figma, Illustrator, Inkscape, svgrepo exports). 902.8 KiB total original size. svgm 0.4.0 vs SVGO 4.0.1, same files, same machine.
 
 | | **SVGM** | **SVGO** |
 |:--|:--|:--|
-| **Compression** | **18.5%** | 18.2% |
-| **Median time** | **347ms** | 11,595ms |
-| **Speed** | **33x faster** | baseline |
-| **Files won** | **55** | 44 |
+| **Compression** | 18.1% | **18.2%** |
+| **Time, one process per file** | **0.48s** | 11.2s |
+| **Time, one process for the folder** | **115ms** | 278ms |
+| **Speed** | **24x faster** per file, 2.4x in batch mode | baseline |
+| **Files won** | 36 | **62** |
 | **Invocations to converge** | **1** | 1-3 |
 
-Full benchmark details at [svgm.dev/docs/benchmarks](https://svgm.dev/docs/benchmarks).
-
-SVGM compresses more than SVGO while being 33x faster.
+0.4.0 trades about 0.4 points of compression (0.3.9: 18.5%) for SVGO-equivalent safety: every optimisation SVGO refuses as unsafe is now refused by svgm too, and a 414-file pixel comparison shows no rendering difference between svgm's output and SVGO's. Almost all of the difference is inside path data: 0.3.9 rounded many coordinates past the configured precision (its `strongRound` compared two rounded values), which 0.4.0 fixes to SVGO's rule; the rest is an absolute/relative segment choice that now sometimes picks the longer form and is tracked for the next release. Full details in [benchmark-results.md](benchmark-results.md).
 
 ## How it works
 

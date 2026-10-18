@@ -252,7 +252,13 @@ fn is_unprefixed_elem(doc: &Document, id: NodeId, name: &str) -> bool {
 fn is_defs_only(doc: &Document, svg: NodeId) -> bool {
     doc.children(svg).all(|c| match &doc.node(c).kind {
         NodeKind::Element(e) => e.prefix.is_none() && e.name == "defs",
-        _ => true,
+        // Only formatting noise is ignorable; real text content means the
+        // document renders something (SVGO hasDefsOnly fails on it too).
+        NodeKind::Text(t) | NodeKind::CData(t) => t.trim().is_empty(),
+        NodeKind::Comment(_) | NodeKind::ProcessingInstruction { .. } | NodeKind::Doctype(_) => {
+            true
+        }
+        NodeKind::Root => true,
     })
 }
 

@@ -2088,7 +2088,7 @@ mod tests {
                 let arc = cmds
                     .iter()
                     .find(|c| c.cmd == 'a' || c.cmd == 'A')
-                    .expect(&format!("no arc found in optimized: {d} -> {result}"));
+                    .unwrap_or_else(|| panic!("no arc found in optimized: {d} -> {result}"));
                 assert_eq!(
                     arc.args[3] as i32, large_arc,
                     "large-arc-flag mangled for {d} -> {result}"

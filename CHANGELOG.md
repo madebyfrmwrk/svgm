@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.0
+
+A correctness release. Every optimisation that SVGO 4 refuses as unsafe is now refused by svgm too, after an audit of all 34 default passes against SVGO's source and fixtures. On the 100-logo benchmark corpus compression goes from 18.5% (0.3.9) to 18.1% (SVGO 4.0.1: 18.2%). Nearly all of that is path data: 0.3.9 rounded many coordinates past the configured precision, which the corrected strongRound rule no longer does. In exchange, none of the cases below change how an SVG renders any more, and a 414-file pixel comparison of svgm output against SVGO output shows no difference. 0 hangs, 0 panics and 0 non-idempotent files on the 433-input robustness corpus. Test count 356 → 670.
+
+### Fixed — parsing and namespaces
+
+- **DOCTYPE internal-subset entities are expanded.** Illustrator exports write `xmlns="&ns_svg;"`; the root element used to leave the SVG namespace and render blank. `<!ENTITY>` values are substituted (depth-capped, byte-budgeted against billion-laughs input), and the raw DOCTYPE text round-trips when `removeDoctype` is disabled.
+- **Editor data is removed by bound namespace URI, not by prefix.** `xmlns:x="…/xlink"` + `x:href`, or `xmlns:a`/`xmlns:i`/`xmlns:dc` bound to non-editor URIs, are preserved; editor data under non-canonical prefixes (`xmlns:ink`, `serif:`, `bx:`, `v:`, `krita:`) is removed together with its declaration instead of leaving an undeclared prefix. Nine editor namespaces SVGO knows were added.
+- **Namespace declarations on a collapsed `<g>` move to the child** instead of being dropped (browsers rejected the output as ill-formed XML).
+- `<?xml-stylesheet?>` and other processing instructions, and `<!--! … -->` license comments, are kept (only the XML declaration and plain comments are removed).
+- Empty `requiredFeatures`/`requiredExtensions`/`systemLanguage` are kept (an empty value means "never render").
+
+### Fixed — things that were deleted or altered although they rendered
+
+- `removeDeprecatedAttrs` no longer strips SVGO's *unsafe* set by default: `xml:space="preserve"`, `xml:base`, `requiredFeatures`, `attributeType`, `clip`, `color-profile`, `glyph-orientation-*` survive both presets (`remove_unsafe` field for opt-in).
+- Attributes referenced by CSS attribute selectors (`svg[version]`, `rect[clip]`, `[fill=black]`, also inside `@media`) are never removed as defaults or deprecated (SVGO #2144).
+- Direct children of `<switch>` are never collapsed or removed, so draw.io / Illustrator fallback branches keep rendering the intended alternative.
+- An empty `<g>` carrying a `filter` (attribute, `style`, or class rule) is kept; its filter and defs are no longer cascade-deleted.
+- `overflow="visible"` is not a default (the UA default is `hidden`); it is no longer stripped from `svg`/`image`/`foreignObject`/`symbol`/`marker`/`pattern`.
+- Leaf shapes with `fill="none" stroke="none"` are no longer deleted (pointer-events hit areas, clipPath/mask/marker children, CSS-restyled shapes). SVGO only does this as the opt-in `removeNone`.
+- Zero-length `<line>` elements and zero-length first path segments are kept when a round or square `stroke-linecap` draws a dot; `h`/`v` runs are no longer merged under `marker-mid`; markers-only paths keep their last vertex.
+- `display="none"` removal honours `style=""` overrides and bails while a stylesheet or script remains; `style="display:none"` is removed too. `removeHiddenElems` now runs after `minifyStyles`, as in SVGO.
+- `<ellipse>` with one missing radius (SVG 2 `auto`) is kept and converted to `<circle>` instead of being deleted.
+- `removeUnknownsAndDefaults` and `removeUselessStrokeAndFill` resolve inherited values through ancestor `style=""` declarations and treat the document as dynamic while a `<style>` or script exists, so `fill="black"` under `<g style="fill:red">` and `stroke-width` under `<g stroke="#000">` survive. `removeUselessStrokeAndFill` skips subtrees with an `id` (`<use>` targets), respects `marker-end`, and ports SVGO's normalisation.
+- `convertShapeToPath` aborts on unit or percentage coordinates (`x="25%"`, `rx="1em"`) instead of treating them as 0.
+- `<text>`/`<tspan>` whose only content is CDATA are not "empty"; whitespace-only `<tspan>` separating words is kept (`read more` no longer becomes `readmore`); whitespace inside `<a>`/`<tref>`/`<altGlyph>` nested in `<text>` is preserved.
+- `removeDesc` only strips `Created with…`/`Created using…` boilerplate, not `Generator:`/`Made with`/`Produced by` descriptions.
+
+### Fixed — path data and transforms
+
+- Opposite-direction `h`/`v` pairs (`h30h-30`) are no longer merged into nothing.
+- Straight-curve detection is normalised by chord length (closed single-cubic loops are no longer flattened; long near-straight curves now simplify).
+- Arc radius rounding uses the real chord for absolute `A` commands; strongRound follows SVGO's candidate-vs-original rule (kappa cubics become arcs again, `-18.079` no longer over-rounds).
+- Redundant movetos (`M…M…`) are dropped unless the path has markers; a leading relative `m` is treated as absolute (SVGO `path2js`) so baking a `translate` no longer displaces the path.
+- `mergePaths` re-serialises parsed commands instead of concatenating raw strings (a leading `m` in the second path shifted the shape), converts arc control points to absolute before the intersection test, refuses paths with `<title>`/`<desc>`/animation children, and resolves blocking `fill`/`stroke`/`marker-*`/`clip-path`/`mask` through `style` and inheritance. Three bugs in the arc-to-cubic port were fixed along the way.
+- `convertTransform` tries the raw transform string before the European-decimal heuristic (`translate(10,20), scale(2,2)` was mangled into `translate(10.2)scale(2.2)`), and no longer bakes translates into elements with an `id`, a `style` attribute, `url()` references, animations, a CSS `transform` rule, or `<text>` with positioned children. Group transforms are only pushed into renderable children without ids or animations, never into `clipPath`/`mask`/`symbol`/gradients. `clip-path`/`mask`/`filter` set in `style` count as group-only properties.
+- `collapseGroups` refuses to merge a group `style=""` onto a child whose presentation attribute conflicts, and never collapses into children with ids or animated attributes.
+
+### Fixed — ids and CSS
+
+- `cleanupIds` bails when scripts, event handlers, `javascript:` links or a `:target` rule are present, and on defs-only documents (sprite sheets); it rewrites `#id` only inside `<style>` (never in visible text), no longer mistakes hex colours for id references, accepts quoted / percent-encoded `url('#id')`, scans identifiers as CSS idents (non-ASCII ids work), reserves ids inside `<foreignObject>`, and assigns names in first-reference order so output is idempotent after `sortDefsChildren`.
+- `removeUselessDefs` recurses like SVGO's `collectUsefulNodes`: referenced gradients/clipPaths nested in id-less `<g>` or nested `<defs>` wrappers are hoisted instead of deleted with the wrapper.
+- `inlineStyles`: stylesheets containing only at-rules (`@keyframes`, `@font-face`, `@media`) are preserved in source order; compound selectors parse correctly (`.a.b` no longer matches `.a`, `#x.a` is id + class); non-ASCII class and id selectors work; rules are applied by exact specificity and source order, and inlined into `style=""` rather than presentation attributes when a stylesheet remains; classes are removed per element only for fully consumed rules (never with scripts, at-rules or `[class]` selectors); `<style media="…">` is wrapped as `@media`; `<style>` inside `<foreignObject>` is ignored; declarations are split quote- and paren-aware (`url(data:…;base64,…)`, `font-family:"a; b"`).
+- While a stylesheet with selectors svgm cannot inline remains, `collapseGroups`, `convertShapeToPath`, `convertEllipseToCircle` and `moveGroupAttrsToElems` leave the structure alone so those selectors keep matching.
+- `minifyStyles` no longer lengthens colours (`green` → `#008000`) or skips the declaration after a pseudo-class colon, and only shortens colour properties.
+
+### Changed
+
+- New shared helpers in `svgm-core` (`passes/util.rs`): computed style resolution, script/stylesheet detection, CSS declaration splitting, ancestor and animation helpers. Internal API only.
+- Many of the fixes above make svgm more conservative than before while a `<style>` or `<script>` element remains in the document. If you rely on maximum compression for such files, inline the CSS first.
+- Known byte-only regressions tracked for 0.4.1: the absolute/relative segment choice in `convertPathData` sometimes picks the longer form; `cleanupIds` skips defs-only documents entirely, so unreferenced `<linearGradient id>`/`<filter id>` in sprite sheets are no longer removed; the structural-CSS guard treats any remaining stylesheet as structural.
+
 ## 0.3.9
 
 ### Fixed

@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(format_number(0.5), ".5");
         assert_eq!(format_number(-0.5), "-.5");
         assert_eq!(format_number(100.0), "100");
-        assert_eq!(format_number(3.14), "3.14");
+        assert_eq!(format_number(3.25), "3.25");
     }
 
     #[test]
