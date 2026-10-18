@@ -1,6 +1,23 @@
 use crate::ast::{Attribute, Document, Element, Namespace, NodeId, NodeKind};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use thiserror::Error;
+
+/// Deepest chain of entity references expanded through other entities
+/// (`&a;` -> `&b;` -> ...). Deeper chains keep the reference text literally.
+const MAX_ENTITY_DEPTH: usize = 8;
+
+/// Total bytes a document's internal-subset entities may expand to, across
+/// all attribute values and text nodes. Once spent, remaining references are
+/// kept literally (guards against "billion laughs" inputs).
+const MAX_ENTITY_EXPANSION: usize = 1 << 20;
+
+/// Entities declared in the DOCTYPE internal subset, plus the expansion
+/// budget they share for the whole document.
+struct Entities {
+    values: HashMap<String, String>,
+    budget: usize,
+}
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -29,6 +46,17 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
     let mut pending_attrs: Vec<Attribute> = Vec::new();
     let mut pending_ns: Vec<Namespace> = Vec::new();
     let mut pending_name: Option<(Option<String>, String)> = None;
+
+    // Entities from the DOCTYPE internal subset. The DTD always precedes the
+    // root element, so the map is complete before any attribute or text is
+    // decoded.
+    let mut entities = Entities {
+        values: HashMap::new(),
+        budget: MAX_ENTITY_EXPANSION,
+    };
+    // Byte offset where an open `<!DOCTYPE ... [` started, so the raw
+    // declaration can be stored on the Doctype node at `]>`.
+    let mut dtd_start: Option<(NodeId, usize)> = None;
 
     for token in tokenizer {
         let token = token.map_err(|e| ParseError::Xml {
@@ -64,21 +92,52 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
                 doc.append_child(parent, id);
             }
 
-            xmlparser::Token::DtdStart { .. }
-            | xmlparser::Token::DtdEnd { .. }
-            | xmlparser::Token::EmptyDtd { .. }
-            | xmlparser::Token::EntityDeclaration { .. } => {
-                // Capture DOCTYPE as a doctype node.
-                // xmlparser splits DTD into multiple tokens; we capture the raw text.
-                // For simplicity, store the DTD range as a doctype node on first DTD token.
+            xmlparser::Token::EmptyDtd { span, .. } => {
+                // `<!DOCTYPE svg PUBLIC "..." "...">` without an internal subset.
                 let parent = *stack.last().ok_or(ParseError::UnexpectedEof)?;
-                // Only add on DtdStart or EmptyDtd to avoid duplicates.
-                if matches!(
-                    token,
-                    xmlparser::Token::DtdStart { .. } | xmlparser::Token::EmptyDtd { .. }
-                ) {
-                    let id = doc.alloc(NodeKind::Doctype(String::new()));
-                    doc.append_child(parent, id);
+                let id = doc.alloc(NodeKind::Doctype(doctype_body(span.as_str())));
+                doc.append_child(parent, id);
+            }
+
+            xmlparser::Token::DtdStart { span, .. } => {
+                // `<!DOCTYPE svg [` — the raw text is filled in at `]>` so
+                // that a disabled removeDoctype pass round-trips it.
+                let parent = *stack.last().ok_or(ParseError::UnexpectedEof)?;
+                let id = doc.alloc(NodeKind::Doctype(String::new()));
+                doc.append_child(parent, id);
+                dtd_start = Some((id, span.start()));
+            }
+
+            xmlparser::Token::DtdEnd { span } => {
+                if let Some((id, start)) = dtd_start.take()
+                    && let Some(raw) = input.get(start..span.end())
+                    && let NodeKind::Doctype(ref mut text) = doc.node_mut(id).kind
+                {
+                    *text = doctype_body(raw);
+                }
+            }
+
+            xmlparser::Token::EntityDeclaration {
+                name,
+                definition,
+                span,
+            } => {
+                // `<!ENTITY ns_svg "http://www.w3.org/2000/svg">` (SVGO
+                // lib/parser.js: sax.ENTITIES). External entities
+                // (`SYSTEM`/`PUBLIC`) cannot be resolved; parameter entities
+                // (`<!ENTITY % x ...>`) are not referenceable from content.
+                // The first declaration of a name wins, per the XML spec.
+                let is_parameter_entity = span
+                    .as_str()
+                    .strip_prefix("<!ENTITY")
+                    .is_some_and(|rest| rest.trim_start().starts_with('%'));
+                if let xmlparser::EntityDefinition::EntityValue(value) = definition
+                    && !is_parameter_entity
+                {
+                    entities
+                        .values
+                        .entry(name.as_str().to_string())
+                        .or_insert_with(|| value.as_str().to_string());
                 }
             }
 
@@ -101,7 +160,7 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
             } => {
                 let prefix_str = prefix.as_str();
                 let local_str = local.as_str();
-                let value_str = decode_xml_entities(value.as_str()).into_owned();
+                let value_str = decode_xml_entities(value.as_str(), &mut entities).into_owned();
 
                 if prefix_str == "xmlns" {
                     // Namespace declaration: xmlns:prefix="uri"
@@ -186,7 +245,7 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
             xmlparser::Token::Text { text } => {
                 let text_str = text.as_str();
                 if !text_str.is_empty() {
-                    let decoded = decode_xml_entities(text_str);
+                    let decoded = decode_xml_entities(text_str, &mut entities);
                     let id = doc.alloc(NodeKind::Text(decoded.into_owned()));
                     let parent = *stack.last().ok_or(ParseError::UnexpectedEof)?;
                     doc.append_child(parent, id);
@@ -227,8 +286,28 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
     Ok(doc)
 }
 
-/// Decode the 5 standard XML entities. Returns a borrowed Cow if no entities present.
-fn decode_xml_entities(input: &str) -> Cow<'_, str> {
+/// `<!DOCTYPE svg PUBLIC "..." [...]>` -> `svg PUBLIC "..." [...]`, the form
+/// the serializer wraps back into `<!DOCTYPE ...>`.
+fn doctype_body(raw: &str) -> String {
+    raw.strip_prefix("<!DOCTYPE")
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(raw)
+        .trim()
+        .to_string()
+}
+
+/// Decode the 5 standard XML entities, numeric character references and
+/// entities declared in the DOCTYPE internal subset. Returns a borrowed Cow
+/// if no entities are present.
+fn decode_xml_entities<'a>(input: &'a str, entities: &mut Entities) -> Cow<'a, str> {
+    decode_xml_entities_at(input, entities, 0)
+}
+
+fn decode_xml_entities_at<'a>(
+    input: &'a str,
+    entities: &mut Entities,
+    depth: usize,
+) -> Cow<'a, str> {
     if !input.contains('&') {
         return Cow::Borrowed(input);
     }
@@ -289,10 +368,34 @@ fn decode_xml_entities(input: &str) -> Cow<'_, str> {
                     }
                 }
                 _ => {
-                    // Unknown entity — preserve as-is
-                    result.push('&');
-                    result.push_str(&entity);
-                    result.push(';');
+                    // Entity from the DOCTYPE internal subset: substitute
+                    // its (recursively decoded) value while the depth and
+                    // document-wide expansion budget allow; otherwise, or
+                    // for an unknown entity, preserve the reference as-is.
+                    //
+                    // The raw value (plus one byte) is charged up front, so
+                    // every attempt consumes budget even when the nested
+                    // decode ends up keeping its references literal; the
+                    // output is therefore bounded by the budget and so is
+                    // the number of decode calls.
+                    let mut expansion = None;
+                    if let Some(value) = entities.values.get(&entity).cloned() {
+                        let cost = value.len() + 1;
+                        if depth < MAX_ENTITY_DEPTH && cost <= entities.budget {
+                            entities.budget -= cost;
+                            expansion = Some(
+                                decode_xml_entities_at(&value, entities, depth + 1).into_owned(),
+                            );
+                        }
+                    }
+                    match expansion {
+                        Some(text) => result.push_str(&text),
+                        None => {
+                            result.push('&');
+                            result.push_str(&entity);
+                            result.push(';');
+                        }
+                    }
                 }
             }
         } else {
@@ -425,6 +528,92 @@ mod tests {
         assert!(parse("<html><svg/></html>").is_ok());
         // A UTF-8 BOM does not break parsing.
         assert!(parse("\u{feff}<svg xmlns=\"http://www.w3.org/2000/svg\"/>").is_ok());
+    }
+
+    #[test]
+    fn doctype_internal_subset_entities_are_expanded() {
+        use crate::serializer::serialize;
+        // Classic Adobe Illustrator export: the SVG namespace itself is an
+        // entity reference, so without expansion nothing renders.
+        let input = "<?xml version=\"1.0\"?>\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [\n <!ENTITY ns_svg \"http://www.w3.org/2000/svg\">\n <!ENTITY brand \"#ff0000\">\n <!ENTITY brand \"ignored-duplicate\">\n <!ENTITY nested \"&brand;&amp;&#65;\">\n <!ENTITY ext SYSTEM \"ext.xml\">\n <!ENTITY % param \"x\">\n]>\n<svg xmlns=\"&ns_svg;\" width=\"10\"><rect fill=\"&brand;\"/><text x=\"1\">&brand; &nested; &unknown; &ext; &param;</text></svg>";
+        let doc = parse(input).unwrap();
+        let svg_id = doc
+            .children(doc.root)
+            .find(|&id| matches!(doc.node(id).kind, NodeKind::Element(_)))
+            .unwrap();
+        let NodeKind::Element(ref svg) = doc.node(svg_id).kind else {
+            panic!("expected element");
+        };
+        assert_eq!(svg.namespaces[0].uri, "http://www.w3.org/2000/svg");
+        let children: Vec<_> = doc.children(svg_id).collect();
+        let NodeKind::Element(ref rect) = doc.node(children[0]).kind else {
+            panic!("expected rect");
+        };
+        assert_eq!(rect.attr("fill"), Some("#ff0000"));
+        let text_id = doc.children(children[1]).next().unwrap();
+        let NodeKind::Text(ref text) = doc.node(text_id).kind else {
+            panic!("expected text");
+        };
+        // Nested references inside an entity value are decoded; external,
+        // parameter and unknown entities are kept as literal text.
+        assert_eq!(text, "#ff0000 #ff0000&A &unknown; &ext; &param;");
+
+        // The raw DOCTYPE round-trips when removeDoctype is disabled.
+        let out = serialize(&doc);
+        assert!(
+            out.starts_with("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("<!ENTITY ns_svg \"http://www.w3.org/2000/svg\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("]><svg xmlns=\"http://www.w3.org/2000/svg\""),
+            "{out}"
+        );
+        assert!(!out.contains("&amp;ns_svg;"), "{out}");
+
+        // A DOCTYPE without an internal subset round-trips too.
+        let doc = parse("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg xmlns=\"http://www.w3.org/2000/svg\"/>").unwrap();
+        let out = serialize(&doc);
+        assert!(
+            out.starts_with("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn entity_expansion_is_bounded() {
+        use crate::serializer::serialize;
+        // "Billion laughs": 10^7 expansions (30 MB) without a cap, within
+        // the depth limit. The byte budget keeps the output around 1 MiB and
+        // the parse fast; references past the budget stay literal.
+        let mut dtd = String::from("<!DOCTYPE svg [<!ENTITY lol0 \"lol\">");
+        for level in 1..8 {
+            let prev = format!("&lol{};", level - 1);
+            dtd.push_str(&format!("<!ENTITY lol{level} \"{}\">", prev.repeat(10)));
+        }
+        dtd.push_str("]>");
+        let input = format!(
+            "{dtd}<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&lol7;</text><rect title=\"&lol7;\"/></svg>"
+        );
+        let doc = parse(&input).unwrap();
+        let out = serialize(&doc);
+        assert!(out.len() < 2 * MAX_ENTITY_EXPANSION, "{}", out.len());
+        assert!(out.contains("lollol"), "some expansion happened");
+        assert!(
+            out.contains("&amp;lol"),
+            "budget exhaustion keeps references literal"
+        );
+
+        // Self-referential entities terminate.
+        let doc = parse("<!DOCTYPE svg [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><text>&a;</text></svg>").unwrap();
+        let out = serialize(&doc);
+        assert!(
+            out.contains("<text>&amp;a;</text>") || out.contains("<text>&amp;b;</text>"),
+            "{out}"
+        );
     }
 
     #[test]

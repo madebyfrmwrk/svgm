@@ -337,3 +337,30 @@ fn non_finite_numbers_never_reach_the_output() {
     let again = svgm_core::optimize(&out.data).unwrap();
     assert_eq!(again.data, out.data, "not idempotent");
 }
+
+#[test]
+fn illustrator_entities() {
+    // DOCTYPE internal-subset entities (`xmlns="&ns_svg;"`, classic Adobe
+    // Illustrator exports) must be expanded, or the root ends up outside the
+    // SVG namespace and browsers render nothing.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/illustrator_entities.svg",
+    ));
+    assert_valid_svg(&output, "illustrator_entities");
+    assert!(
+        output.contains("xmlns=\"http://www.w3.org/2000/svg\""),
+        "{output}"
+    );
+    assert!(!output.contains("&amp;ns_"), "{output}");
+    assert!(!output.contains("&amp;brand"), "{output}");
+    assert!(
+        output.contains("fill=\"red\"") || output.contains("fill=\"#f00\""),
+        "{output}"
+    );
+    assert!(output.contains("#ff0000 text"), "{output}");
+    // Editor namespaces bound through entities are recognised by URI.
+    assert!(!output.contains("i:pgf"), "{output}");
+    assert!(!output.contains("xmlns:i="), "{output}");
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}
