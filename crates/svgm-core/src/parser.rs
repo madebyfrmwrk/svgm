@@ -52,7 +52,9 @@ pub fn parse(input: &str) -> Result<Document, ParseError> {
     // decoded.
     let mut entities = Entities {
         values: HashMap::new(),
-        budget: MAX_ENTITY_EXPANSION,
+        // Scale with the input so large valid documents never run out, while
+        // tiny billion-laughs inputs stay capped at MAX_ENTITY_EXPANSION.
+        budget: MAX_ENTITY_EXPANSION.max(input.len().saturating_mul(16)),
     };
     // Byte offset where an open `<!DOCTYPE ... [` started, so the raw
     // declaration can be stored on the Doctype node at `]>`.
@@ -395,14 +397,21 @@ fn decode_xml_entities_at<'a>(
                     // output is therefore bounded by the budget and so is
                     // the number of decode calls.
                     let mut expansion = None;
-                    if let Some(value) = entities.values.get(&entity).cloned() {
-                        let cost = value.len() + 1;
-                        if depth < MAX_ENTITY_DEPTH && cost <= entities.budget {
-                            entities.budget -= cost;
-                            expansion = Some(
-                                decode_xml_entities_at(&value, entities, depth + 1).into_owned(),
-                            );
+                    // Check depth and budget *before* copying the value, and
+                    // charge every attempt (even a refused or unknown one) so
+                    // lookup work stays bounded too.
+                    let value = match entities.values.get(&entity) {
+                        Some(v) if depth < MAX_ENTITY_DEPTH && v.len() < entities.budget => {
+                            Some(v.clone())
                         }
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        entities.budget -= value.len() + 1;
+                        expansion =
+                            Some(decode_xml_entities_at(&value, entities, depth + 1).into_owned());
+                    } else {
+                        entities.budget = entities.budget.saturating_sub(1);
                     }
                     match expansion {
                         Some(text) => result.push_str(&text),
