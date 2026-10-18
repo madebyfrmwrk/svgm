@@ -929,6 +929,16 @@ fn remove_redundant(commands: Vec<PathCmd>, precision: u32, has_markers: bool) -
             }
             'C' | 'S' | 'Q' | 'T' => {
                 let args = &cmd.args;
+                // A curve whose control points and end point all sit on the
+                // current point draws nothing (SVGO removeUseless drops an
+                // all-zero relative c/s/q/t). The straight-curve test refuses
+                // zero chords on purpose, so this is the only place it goes.
+                if args
+                    .chunks(2)
+                    .all(|p| approx_eq(p[0], cx, precision) && approx_eq(p[1], cy, precision))
+                {
+                    continue;
+                }
                 let (x, y) = (args[args.len() - 2], args[args.len() - 1]);
                 cx = x;
                 cy = y;
@@ -2337,6 +2347,17 @@ mod tests {
         assert_eq!(out, "M33.027833 1.96545901l5.0135294 5.01352941");
         // Genuinely straight control points still collapse at p=3.
         assert_eq!(optimize_path("M0 0C1 1 2 2 3 3", 3).unwrap(), "M0 0 3 3");
+        // A curve that never leaves the current point draws nothing and is
+        // dropped (SVGO removeUseless), unlike a loop that ends at its start.
+        assert_eq!(
+            optimize_path("M10 10C10 10 10 10 10 10", 3).unwrap(),
+            "M10 10"
+        );
+        assert_eq!(optimize_path("M10 10Q10 10 10 10", 3).unwrap(), "M10 10");
+        assert_eq!(
+            optimize_path("M0 0L5 5C5 5 5 5 5 5L10 0", 3).unwrap(),
+            "M0 0 5 5 10 0"
+        );
     }
 
     #[test]
