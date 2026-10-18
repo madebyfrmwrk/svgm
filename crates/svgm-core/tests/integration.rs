@@ -571,3 +571,75 @@ fn processing_instructions_and_license_comments_survive_both_presets() {
         "{output}"
     );
 }
+#[test]
+fn switch_fallback() {
+    // draw.io / Illustrator exports: every direct child of <switch> is an
+    // alternative branch. The empty requiredFeatures branch and the
+    // multi-child fallback group must both survive, in both presets.
+    let input = fs::read_to_string("tests/fixtures/regression/switch_fallback.svg").unwrap();
+    for preset in [svgm_core::Preset::Safe, svgm_core::Preset::Default] {
+        let config = svgm_core::Config {
+            preset,
+            ..Default::default()
+        };
+        let output = svgm_core::optimize_with_config(&input, &config)
+            .unwrap()
+            .data;
+        assert_valid_svg(&output, "switch_fallback");
+        assert_eq!(
+            output.matches("<switch>").count(),
+            2,
+            "{preset:?}: {output}"
+        );
+        // draw.io: empty branch then the <a> fallback
+        assert!(
+            output.contains("<switch><g") && output.contains("</g><a "),
+            "{preset:?}: {output}"
+        );
+        assert!(
+            output.contains("Viewer does not support full SVG 1.1"),
+            "{preset:?}: {output}"
+        );
+        // Illustrator: foreignObject branch then the drawing group
+        assert!(output.contains("<foreignObject"), "{preset:?}: {output}");
+        assert!(
+            output.contains("</g><g>") || output.contains("</g><g "),
+            "{preset:?}: {output}"
+        );
+        assert!(output.contains("fill=\"red\""), "{preset:?}: {output}");
+        assert!(
+            output.contains("fill=\"blue\"") || output.contains("fill=\"#00f\""),
+            "{preset:?}: {output}"
+        );
+        let again = svgm_core::optimize_with_config(&output, &config)
+            .unwrap()
+            .data;
+        assert_eq!(again, output, "{preset:?}: not idempotent");
+    }
+}
+
+#[test]
+fn transform_url_refs() {
+    // A translate must stay a transform attribute on elements whose
+    // rendering depends on the untransformed user space (userSpaceOnUse
+    // clip/gradient/mask references, style refs, positioned <text>, <use>
+    // instances), and a group transform must never be pushed into a
+    // non-rendered resource child such as <clipPath>.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/transform_url_refs.svg",
+    ));
+    assert_valid_svg(&output, "transform_url_refs");
+    for kept in [
+        "clip-path=\"url(#a)\" d=\"M0 0h10v10H0z\" transform=\"translate(100,100)\"",
+        "fill=\"url(#b)\" transform=\"translate(100,20)\"",
+        "style=\"mask:url(#c)\" transform=\"translate(20,100)\"",
+        "<text transform=\"translate(50,50)\"><tspan x=\"0\" y=\"10\">a</tspan></text>",
+        "id=\"d\" transform=\"translate(5,5)\"",
+        "<g transform=\"scale(2)\"><clipPath id=\"e\">",
+    ] {
+        assert!(output.contains(kept), "{kept} missing from {output}");
+    }
+    assert_eq!(output.matches("transform=").count(), 6, "{output}");
+    let again = svgm_core::optimize(&output).unwrap().data;
+    assert_eq!(again, output, "not idempotent");
+}
