@@ -1097,3 +1097,31 @@ fn regression_editor_xml_small_items() {
     let again = svgm_core::optimize(&output).unwrap();
     assert_eq!(again.data, output, "not idempotent");
 }
+
+#[test]
+fn regression_merge_stroked_touching() {
+    // Issue #49: merging puts both fills under both strokes, so stroked
+    // shapes whose strokes touch must stay separate paths.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/merge_stroked_touching.svg",
+    ));
+    assert_valid_svg(&output, "merge_stroked_touching");
+    assert_eq!(output.matches("<path").count(), 2, "{output}");
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+
+    // SVGO fixture inlineStyles.19 without its data-name attributes: the two
+    // touching halves stay apart, the lower bar (11 units from the top half)
+    // may join it, the upper bar (1 unit away) may not.
+    let (output, _, _) = optimize_file(Path::new(
+        "tests/fixtures/regression/merge_stroked_inline_styles_19.svg",
+    ));
+    assert_valid_svg(&output, "merge_stroked_inline_styles_19");
+    assert_eq!(output.matches("<path").count(), 3, "{output}");
+    assert!(
+        output.contains("a8 8 0 0 1 8 8v2h-16v-2a8 8 0 0 1 8-8z\""),
+        "{output}"
+    );
+    let again = svgm_core::optimize(&output).unwrap();
+    assert_eq!(again.data, output, "not idempotent");
+}

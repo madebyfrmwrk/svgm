@@ -1,6 +1,7 @@
 use super::convert_path_data::{PathCmd, parse_path_strict, serialize_path};
 use super::{
-    Computed, Pass, PassResult, computed_style_with, style_declaration, stylesheet_declarations,
+    Computed, Pass, PassResult, computed_style_with, parse_svg_number, style_declaration,
+    stylesheet_declarations,
 };
 use crate::ast::{Document, NodeId, NodeKind};
 
@@ -28,6 +29,7 @@ impl Pass for MergePaths {
             return PassResult::Unchanged;
         }
 
+        let sheet = SheetStroke::of(doc);
         let mut changed = false;
         let ids = doc.traverse();
 
@@ -43,7 +45,7 @@ impl Pass for MergePaths {
         }
 
         for parent_id in parents {
-            if merge_adjacent_paths(doc, parent_id, self.precision) {
+            if merge_adjacent_paths(doc, parent_id, self.precision, sheet) {
                 changed = true;
             }
         }
@@ -141,6 +143,118 @@ fn stylesheet_blocks_merge(doc: &Document) -> bool {
     })
 }
 
+/// Stroke properties a remaining stylesheet may set on some path. Selectors
+/// are not resolved, so a declaration applies to every path conservatively.
+#[derive(Clone, Copy, Default)]
+struct SheetStroke {
+    /// A `stroke` declaration other than `none`: any path may be stroked.
+    paints: bool,
+    /// A declaration changing how far a stroke reaches: the margin is unknown.
+    geometry: bool,
+}
+
+impl SheetStroke {
+    fn of(doc: &Document) -> Self {
+        let mut sheet = SheetStroke::default();
+        for (prop, value) in stylesheet_declarations(doc) {
+            if prop.eq_ignore_ascii_case("stroke") {
+                sheet.paints |= !value.trim().eq_ignore_ascii_case("none");
+            } else if [
+                "stroke-width",
+                "stroke-linejoin",
+                "stroke-miterlimit",
+                "stroke-linecap",
+                "vector-effect",
+            ]
+            .iter()
+            .any(|p| prop.eq_ignore_ascii_case(p))
+            {
+                sheet.geometry = true;
+            }
+        }
+        sheet
+    }
+}
+
+/// How far a path's stroke can reach beyond the points gathered from its
+/// outline, per axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StrokeExtent {
+    /// No visible stroke: only the fill geometry matters.
+    NoStroke,
+    Margin(f64),
+    /// The stroke reach cannot be bounded statically; never merge.
+    Unknown,
+}
+
+/// A `stroke-width` in user units: a plain number or `px`. Percentages,
+/// font-relative and other units, `calc()` and negatives give `None`.
+fn parse_stroke_width(value: &str) -> Option<f64> {
+    let v = value.trim();
+    let v = if v.len() > 2 && v[v.len() - 2..].eq_ignore_ascii_case("px") {
+        &v[..v.len() - 2]
+    } else {
+        v
+    };
+    parse_svg_number(v).filter(|w| *w >= 0.0)
+}
+
+/// Stroke extent of path `id`. Merging puts both fills under both strokes,
+/// so where one path's stroke reaches into its neighbour the paint order
+/// changes (SVGO ignores the stroke here and renders such merges
+/// differently). The stroke stays within `width / 2` of the outline, except
+/// at miter joins (up to `miterlimit * width / 2` from the vertex) and
+/// square caps (a corner at `sqrt(2) * width / 2` on one axis).
+fn stroke_extent(doc: &Document, id: NodeId, sheet: SheetStroke) -> StrokeExtent {
+    let static_value = |prop: &str| match computed_style_with(doc, id, prop, false) {
+        Computed::Static(v) => Some(v.trim().to_ascii_lowercase()),
+        _ => None,
+    };
+    let stroked = static_value("stroke").is_some_and(|v| v != "none") || sheet.paints;
+    if !stroked {
+        return StrokeExtent::NoStroke;
+    }
+    if sheet.geometry {
+        return StrokeExtent::Unknown;
+    }
+    let width = match static_value("stroke-width") {
+        None => 1.0,
+        Some(v) => match parse_stroke_width(&v) {
+            Some(w) => w,
+            None => return StrokeExtent::Unknown,
+        },
+    };
+    if width == 0.0 {
+        return StrokeExtent::NoStroke;
+    }
+    // A non-scaling stroke's width is in screen units.
+    if static_value("vector-effect").is_some_and(|v| v != "none") {
+        return StrokeExtent::Unknown;
+    }
+    let join = match static_value("stroke-linejoin").as_deref() {
+        Some("round" | "bevel") => 1.0,
+        // miter (the initial value), miter-clip and arcs are all cut off at
+        // the miter limit.
+        _ => match static_value("stroke-miterlimit") {
+            None => 4.0,
+            Some(v) => match parse_svg_number(&v) {
+                Some(limit) if limit >= 1.0 => limit,
+                _ => return StrokeExtent::Unknown,
+            },
+        },
+    };
+    let cap = match static_value("stroke-linecap").as_deref() {
+        None | Some("butt" | "round") => 1.0,
+        _ => std::f64::consts::SQRT_2,
+    };
+    let margin = width / 2.0 * f64::max(join, cap);
+    if margin.is_finite() {
+        StrokeExtent::Margin(margin)
+    } else {
+        StrokeExtent::Unknown
+    }
+}
+
 /// Strictly parsed commands and sample points of a path element's `d`.
 /// `None` when the attribute is missing or any part of it fails to parse
 /// (such a path never takes part in a merge, so a truncated tail can never
@@ -168,7 +282,12 @@ fn set_d(doc: &mut Document, id: NodeId, d: String) {
 
 /// Try to merge adjacent <path> siblings under the given parent.
 /// Returns true if any merge was performed.
-fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId, precision: u32) -> bool {
+fn merge_adjacent_paths(
+    doc: &mut Document,
+    parent_id: NodeId,
+    precision: u32,
+    sheet: SheetStroke,
+) -> bool {
     let mut changed = false;
 
     loop {
@@ -209,7 +328,17 @@ fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId, precision: u32) -
                 .filter(|&id| is_mergeable_path(doc, id))
                 .collect();
 
-            if path_ids.len() >= 2 {
+            // Every path in the run has the same parent and identical
+            // non-`d` attributes, so they all share one stroke extent.
+            if path_ids.len() >= 2
+                && let Some(margin) = match stroke_extent(doc, path_ids[0], sheet) {
+                    StrokeExtent::NoStroke => Some(0.0),
+                    StrokeExtent::Margin(m) => Some(m),
+                    StrokeExtent::Unknown => None,
+                }
+            {
+                // Slack for the arc approximation and re-serialization.
+                let tolerance = 10f64.powi(-(precision as i32));
                 // Accumulate *parsed* commands, never raw strings: the parser
                 // turns a leading relative `m` into `M` (so the second shape
                 // can't be shifted by the first one's end point), and the
@@ -226,7 +355,7 @@ fn merge_adjacent_paths(doc: &mut Document, parent_id: NodeId, precision: u32) -
                     // Merge only when both parse and their geometry is disjoint
                     if let (Some((acc_cmds, acc_pts)), Some((cur_cmds, cur_pts))) =
                         (acc.as_mut(), current.as_ref())
-                        && !intersects(acc_pts, cur_pts)
+                        && !intersects_with_margin(acc_pts, cur_pts, margin, tolerance)
                     {
                         acc_cmds.extend(cur_cmds.iter().cloned());
                         acc_pts.merge(cur_pts);
@@ -922,6 +1051,52 @@ fn arc_to_cubic_impl(
         full.extend_from_slice(&res);
         full
     }
+}
+
+/// [`intersects`] for paths whose strokes reach `margin` past their
+/// gathered points. With a margin, pieces merge only when their bounding
+/// boxes are more than `2 * margin + tolerance` apart on some axis, globally
+/// or for every pair of subpaths; touching counts as overlapping, and the
+/// hull test is skipped because it only knows the unstroked outline (and
+/// never sees degenerate hulls such as straight lines).
+fn intersects_with_margin(p1: &PathPoints, p2: &PathPoints, margin: f64, tolerance: f64) -> bool {
+    if margin <= 0.0 {
+        return intersects(p1, p2);
+    }
+    let reach = 2.0 * margin + tolerance;
+    // `!(gap <= reach)` would let NaN through; write it so NaN overlaps.
+    let apart = |a_min: f64, a_max: f64, b_min: f64, b_max: f64| {
+        b_min - a_max > reach || a_min - b_max > reach
+    };
+    if apart(
+        p1.global_min_x,
+        p1.global_max_x,
+        p2.global_min_x,
+        p2.global_max_x,
+    ) || apart(
+        p1.global_min_y,
+        p1.global_max_y,
+        p2.global_min_y,
+        p2.global_max_y,
+    ) {
+        return false;
+    }
+    let non_empty = |sp: &&SubPath| !sp.points.is_empty();
+    p1.subpaths.iter().filter(non_empty).any(|a| {
+        p2.subpaths.iter().filter(non_empty).any(|b| {
+            !(apart(
+                a.points[a.min_x][0],
+                a.points[a.max_x][0],
+                b.points[b.min_x][0],
+                b.points[b.max_x][0],
+            ) || apart(
+                a.points[a.min_y][1],
+                a.points[a.max_y][1],
+                b.points[b.min_y][1],
+                b.points[b.max_y][1],
+            ))
+        })
+    })
 }
 
 /// Check if two sets of path points have geometric intersection.
@@ -1686,5 +1861,216 @@ mod tests {
             assert_eq!(result, PassResult::Unchanged, "{bad}");
             assert_eq!(crate::serializer::serialize(&doc), input);
         }
+    }
+
+    // --- Stroke extent (#49) ---
+
+    /// Two paths sharing `attrs`, wrapped in an `<svg>`.
+    fn pair(d1: &str, d2: &str, attrs: &str) -> String {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{d1}\" {attrs}/><path d=\"{d2}\" {attrs}/></svg>"
+        )
+    }
+
+    /// A 10x10 square at `x` and one at `x2`.
+    fn squares(x2: f64, attrs: &str) -> String {
+        pair("M0 0h10v10H0z", &format!("M{x2} 0h10v10H{x2}z"), attrs)
+    }
+
+    fn assert_merged(input: &str) {
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed, "{input}");
+        assert_eq!(output.matches("<path").count(), 1, "{output}");
+    }
+
+    fn assert_kept(input: &str) {
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Unchanged, "{input}");
+        assert_eq!(output, input);
+    }
+
+    const TOUCHING_D1: &str = "M25.5 25.5a8 8 0 0 1 8 8v2h-16v-2a8 8 0 0 1 8-8z";
+    const TOUCHING_D2: &str = "M25.5 25.5a8 8 0 0 0 8-8v-2h-16v2a8 8 0 0 0 8 8z";
+
+    #[test]
+    fn stroked_shapes_that_touch_are_not_merged() {
+        // Issue #49 repro: the shapes touch at (25.5, 25.5); merged, both
+        // fills are painted before both strokes, which changes the render.
+        assert_kept(&pair(
+            TOUCHING_D1,
+            TOUCHING_D2,
+            "fill=\"red\" stroke=\"gray\" fill-rule=\"evenodd\"",
+        ));
+    }
+
+    #[test]
+    fn unstroked_or_zero_width_touching_shapes_still_merge() {
+        for attrs in [
+            "fill=\"red\" fill-rule=\"evenodd\"",
+            "fill=\"red\" stroke=\"gray\" stroke-width=\"0\"",
+            "fill=\"red\" stroke=\"none\" stroke-width=\"5\"",
+            "fill=\"red\" stroke=\"NONE\"",
+        ] {
+            assert_merged(&pair(TOUCHING_D1, TOUCHING_D2, attrs));
+        }
+    }
+
+    #[test]
+    fn far_apart_stroked_shapes_still_merge() {
+        for attrs in [
+            "fill=\"red\" stroke=\"blue\" stroke-width=\"2\"",
+            "fill=\"red\" stroke=\"blue\" stroke-width=\"2px\"",
+            "fill=\"red\" style=\"stroke:blue;stroke-width:2PX\"",
+        ] {
+            assert_merged(&squares(110.0, attrs));
+        }
+    }
+
+    #[test]
+    fn default_miter_join_reaches_four_half_widths() {
+        // width 4, miterlimit 4: margin 8 per side, so a 1-unit gap overlaps.
+        assert_kept(&squares(
+            11.0,
+            "fill=\"red\" stroke=\"blue\" stroke-width=\"4\"",
+        ));
+        // A gap of 17 > 2 * 8 is safe.
+        assert_merged(&squares(
+            27.0,
+            "fill=\"red\" stroke=\"blue\" stroke-width=\"4\"",
+        ));
+    }
+
+    #[test]
+    fn round_and_bevel_joins_reach_half_the_width() {
+        for join in ["round", "bevel"] {
+            let attrs = format!(
+                "fill=\"red\" stroke=\"blue\" stroke-width=\"4\" stroke-linejoin=\"{join}\""
+            );
+            // Each stroke reaches 2 past its square: gap 5 is clear, 4 touches,
+            // 3 overlaps.
+            assert_merged(&squares(15.0, &attrs));
+            assert_kept(&squares(14.0, &attrs));
+            assert_kept(&squares(13.0, &attrs));
+        }
+    }
+
+    #[test]
+    fn miterlimit_scales_the_margin() {
+        let base = "fill=\"red\" stroke=\"blue\" stroke-width=\"2\"";
+        assert_kept(&squares(13.0, base));
+        assert_merged(&squares(13.0, &format!("{base} stroke-miterlimit=\"1\"")));
+        for bad in [".5", "x"] {
+            assert_kept(&squares(
+                13.0,
+                &format!("{base} stroke-miterlimit=\"{bad}\""),
+            ));
+        }
+    }
+
+    #[test]
+    fn overlapping_collinear_stroked_lines_are_not_merged() {
+        // Zero-height boxes and two-point hulls hid this overlap entirely.
+        assert_kept(&pair(
+            "M0 0H10",
+            "M5 0H15",
+            "stroke=\"red\" stroke-opacity=\".5\"",
+        ));
+    }
+
+    #[test]
+    fn square_caps_reach_further_than_round_joins() {
+        let attrs = |cap: &str| {
+            format!(
+                "fill=\"none\" stroke=\"red\" stroke-opacity=\".5\" stroke-width=\"2\" stroke-linejoin=\"round\" stroke-linecap=\"{cap}\""
+            )
+        };
+        // Boxes 2.5 apart: butt caps reach 1 each, square caps sqrt(2) each.
+        assert_kept(&pair("M0 0L10 10", "M22.5 0L12.5 10", &attrs("square")));
+        assert_merged(&pair("M0 0L10 10", "M22.5 0L12.5 10", &attrs("butt")));
+    }
+
+    #[test]
+    fn unknown_stroke_widths_are_not_merged() {
+        for width in ["1em", "50%", "calc(1px + 1px)", "-1"] {
+            assert_kept(&squares(
+                110.0,
+                &format!("fill=\"red\" stroke=\"blue\" stroke-width=\"{width}\""),
+            ));
+        }
+    }
+
+    #[test]
+    fn inherited_stroke_is_honoured() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><g stroke=\"gray\" stroke-width=\"4\" stroke-linejoin=\"round\"><path d=\"M0 0h10v10H0z\" fill=\"red\"/><path d=\"M13 0h10v10H13z\" fill=\"red\"/></g></svg>";
+        assert_kept(input);
+        let input = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><g style=\"stroke:gray\"><path d=\"{TOUCHING_D1}\" fill=\"red\"/><path d=\"{TOUCHING_D2}\" fill=\"red\"/></g></svg>"
+        );
+        assert_kept(&input);
+    }
+
+    #[test]
+    fn non_scaling_stroke_is_not_merged() {
+        assert_kept(&squares(
+            110.0,
+            "fill=\"red\" stroke=\"blue\" vector-effect=\"non-scaling-stroke\"",
+        ));
+        // Without a stroke the vector effect changes nothing.
+        assert_merged(&squares(
+            110.0,
+            "fill=\"red\" vector-effect=\"non-scaling-stroke\"",
+        ));
+    }
+
+    #[test]
+    fn stylesheet_stroke_is_honoured() {
+        let sheet = |css: &str, d1: &str, d2: &str, attrs: &str| {
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style><path d=\"{d1}\" {attrs}/><path d=\"{d2}\" {attrs}/></svg>"
+            )
+        };
+        assert_kept(&sheet(
+            ".a{stroke:gray}",
+            TOUCHING_D1,
+            TOUCHING_D2,
+            "class=\"a\" fill=\"red\"",
+        ));
+        assert_merged(&sheet(
+            ".a{stroke:gray}",
+            "M0 0h10v10H0z",
+            "M110 0h10v10h-10z",
+            "class=\"a\" fill=\"red\"",
+        ));
+        // The sheet may change the width of any path: margin unknown.
+        assert_kept(&sheet(
+            ".x{stroke-width:2}",
+            "M0 0h10v10H0z",
+            "M110 0h10v10h-10z",
+            "fill=\"red\" stroke=\"blue\"",
+        ));
+    }
+
+    #[test]
+    fn accumulated_path_is_tested_with_the_margin() {
+        // margin 4: the first two merge (90 apart); the third is 4 from the
+        // first square, inside the accumulated path's reach.
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0h10v10H0z\" fill=\"red\" stroke=\"blue\" stroke-width=\"2\"/><path d=\"M100 0h10v10h-10z\" fill=\"red\" stroke=\"blue\" stroke-width=\"2\"/><path d=\"M14 0h10v10H14z\" fill=\"red\" stroke=\"blue\" stroke-width=\"2\"/></svg>";
+        let (result, output) = run_pass(input);
+        assert_eq!(result, PassResult::Changed);
+        assert_eq!(output.matches("<path").count(), 2, "{output}");
+    }
+
+    #[test]
+    fn intersects_with_margin_bounds() {
+        let a = gather_points("M0 0h10v10H0z").unwrap();
+        let b = gather_points("M13 0h10v10H13z").unwrap();
+        // Gap 3: touching at margin 1.5 counts as overlapping.
+        assert!(intersects_with_margin(&a, &b, 1.5, 1e-3));
+        assert!(!intersects_with_margin(&a, &b, 1.4, 1e-3));
+        assert_eq!(
+            intersects_with_margin(&a, &b, 0.0, 1e-3),
+            intersects(&a, &b)
+        );
+        assert!(!intersects(&a, &b));
     }
 }
