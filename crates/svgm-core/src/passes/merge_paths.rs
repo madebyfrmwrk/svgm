@@ -191,7 +191,8 @@ enum StrokeExtent {
 /// font-relative and other units, `calc()` and negatives give `None`.
 fn parse_stroke_width(value: &str) -> Option<f64> {
     let v = value.trim();
-    let v = if v.len() > 2 && v[v.len() - 2..].eq_ignore_ascii_case("px") {
+    let unit = v.len().checked_sub(2).and_then(|i| v.get(i..));
+    let v = if unit.is_some_and(|u| u.eq_ignore_ascii_case("px")) {
         &v[..v.len() - 2]
     } else {
         v
@@ -1991,7 +1992,17 @@ mod tests {
 
     #[test]
     fn unknown_stroke_widths_are_not_merged() {
-        for width in ["1em", "50%", "calc(1px + 1px)", "-1"] {
+        // Multi-byte characters around the unit must not split a char.
+        for width in [
+            "1em",
+            "50%",
+            "calc(1px + 1px)",
+            "-1",
+            "1\u{20ac}",
+            "\u{e9}",
+            "px",
+            "1\u{e9}x",
+        ] {
             assert_kept(&squares(
                 110.0,
                 &format!("fill=\"red\" stroke=\"blue\" stroke-width=\"{width}\""),

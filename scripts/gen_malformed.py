@@ -315,6 +315,12 @@ add("dupid_01_triple", wrap('<defs><linearGradient id="g"/><linearGradient id="g
 add("dupid_02_nested_and_css", wrap('<style>#x{fill:red}[id]{stroke:blue}</style><g id="x"><g id="x"><rect id="x" width="1" height="1"/></g></g><use href="#x"/>'))
 add("dupid_03_unicode_empty", wrap('<rect id="ü" width="1" height="1"/><rect id="ü" width="1" height="1"/><rect id="" width="1" height="1"/><rect id="" width="1" height="1"/><use href="#%C3%BC"/>'))
 
+# Stroke extent of merge candidates (#49): odd widths, joins, caps, limits.
+stroke_values = ["1€", "€", "px", "1PX", "1e999", "-0", "1e-320", "nan", "+.5e1px", "1 px", " 2 ", "1é", "inherit", ""]
+for i, v in enumerate(stroke_values):
+    attrs = f'fill="red" stroke="blue" stroke-width="{v}" stroke-linejoin="{v}" stroke-miterlimit="{v}" stroke-linecap="{v}" vector-effect="{v}"'
+    add(f"mergestroke_{i:02d}", wrap(f'<path d="M0 0h10v10H0z" {attrs}/><path d="M11 0h10v10H11z" {attrs}/><path d="M500 0h1v1z" {attrs}/>'))
+
 for name, content in cases.items():
     with open(os.path.join(OUT, name + ".svg"), "w", encoding="utf-8", errors="surrogatepass") as f:
         f.write(content)
